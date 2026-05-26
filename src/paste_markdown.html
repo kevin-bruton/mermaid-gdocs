@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <base target="_top">
+  <link rel="stylesheet" href="https://ssl.gstatic.com/docs/script/css/add-ons1.css">
+  <title>Paste from markdown</title>
+</head>
+<body>
+  <form id="form">
+    <div class="toolbar">
+      <button type="button" id="clipboard">Paste clipboard</button>
+      <div id="summary"></div>
+    </div>
+
+    <label for="markdown">Markdown</label>
+    <div class="frame-controls">
+      <label for="frameBorderWidth">Border</label>
+      <input id="frameBorderWidth" type="number" min="0" max="24" step="1" value="1" />
+      <label for="frameBorderColor">Color</label>
+      <input id="frameBorderColor" type="color" value="#000000" />
+      <label for="framePadding">Padding</label>
+      <input id="framePadding" type="number" min="0" max="64" step="1" value="0" />
+    </div>
+    <textarea id="markdown" spellcheck="false" placeholder="# Notes&#10;&#10;- Bullet point&#10;&#10;```mermaid forest&#10;graph LR&#10;  A --> B&#10;```"></textarea>
+
+    <div class="buttons">
+      <button type="button" id="cancel">Cancel</button>
+      <button type="submit" class="action" id="submit">Insert</button>
+    </div>
+
+    <div id="status"></div>
+  </form>
+
+  <div id="renderHost" aria-hidden="true"></div>
+
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    import { marked } from 'https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js';
+
+    const DOC_MAX_DIMENSION = 1600;
+    const MAX_RASTER_DIMENSION = 1600;
+    const EXPORT_QUALITY_MULTIPLIER = 2;
+
+    const FRAME_DEFAULTS = {
+      borderWidth: 1,
+      borderColor: '#000000',
+      padding: 0,
+    };
+
+    const IMAGE_FRAME = {
+      ...FRAME_DEFAULTS,
+    };
+
+    function getDocumentImageMaxWidth() {
+      const maxWidth = Number(window.mermaidImageLayoutFromGoogle?.maxWidth);
+      return Number.isFinite(maxWidth) && maxWidth > 0
+        ? Math.floor(maxWidth)
+        : DOC_MAX_DIMENSION;
+    }
+
+    const byId = id => document.getElementById(id);
+    const markdownInput = byId('markdown');
+    const submitButton = byId('submit');
+    const statusNode = byId('status');
+    const summaryNode = byId('summary');
+    const renderHost = byId('renderHost');
+    let renderSequence = 0;
+
+    marked.setOptions({
+      gfm: true,
+      breaks: false,
+    });
+
+    function setStatus(message, isError = false) {
+      statusNode.textContent = message || '';
+      statusNode.className = isError ? 'error' : '';
+    }
+
+    function setBusy(isBusy) {
+      markdownInput.disabled = isBusy;
+      submitButton.disabled = isBusy;
+      byId('cancel').disabled = isBusy;
+      byId('clipboard').disabled = isBusy;
+      byId('frameBorderWidth').disabled = isBusy;
+      byId('frameBorderColor').disabled = isBusy;
+      byId('framePadding').disabled = isBusy;
+    }
+
+    function sanitizeFrameConfig(config = {}) {
+      const borderWidth = Number.isFinite(Number(config.borderWidth))
+        ? Math.max(0, Math.min(24, Math.round(Number(config.borderWidth))))
+        : FRAME_DEFAULTS.borderWidth;
+      const padding = Number.isFinite(Number(config.padding))
+        ? Math.max(0, Math.min(64, Math.round(Number(config.padding))))
+        : FRAME_DEFAULTS.padding;
+      const borderColor = /^#[0-9a-fA-F]{6}$/.test(String(config.borderColor || '').trim())
+        ? String(config.borderColor).toLowerCase()
+        : FRAME_DEFAULTS.borderColor;
+
+      return {
+        borderWidth,
+        borderColor,
+        padding,
+      };
+    }
+
+    function applyFrameConfig(config = {}) {
+      const safe = sanitizeFrameConfig(config);
+      Object.assign(IMAGE_FRAME, safe);
+
+      byId('frameBorderWidth').value = String(safe.borderWidth);
+      byId('frameBorderColor').value = safe.borderColor;
+      byId('framePadding').value = String(safe.padding);
+    }
+
+    function getFrameConfigFromInputs() {
+      return sanitizeFrameConfig({
+        borderWidth: byId('frameBorderWidth').value,
+        borderColor: byId('frameBorderColor').value,
+        padding: byId('framePadding').value,
+      });
+    }
+
+    async function persistFrameConfig() {
+      const config = getFrameConfigFromInputs();
+      applyFrameConfig(config);
+      await callServer('setImageFrameConfig', {
+        borderWidth: config.borderWidth,
+        borderColor: config.borderColor,
+        padding: config.padding,
+      });
+      return config;
+    }
+
+    function debounce(fn, wait) {
+      let timeoutId = null;
+      return (...args) => {
+        window.clearTimeout(timeoutId);
+        timeoutId = window.setTimeout(() => fn(...args), wait);
+      };
+    }
+
+    function mergeAdjacentSegments(segments) {
+      const merged = [];
+      segments.forEach(segment => {
+        if (!segment || !segment.text) {
+          return;
+        }
+
+        const previous = merged[merged.length - 1];
+        const sameStyle = previous
+          && previous.bold === segment.bold
+          && previous.italic === segment.italic
+          && previous.code === segment.code
+          && previous.strikethrough === segment.strikethrough
+          && previous.linkUrl === segment.linkUrl;
+
+        if (sameStyle) {
+          previous.text += segment.text;
+          return;
+        }
+
+        merged.push({ ...segment });
+      });
+      return merged;
+    }
+
+    function inlineSegmentsFromMarkdown(markdown) {
+      const html = marked.parseInline(markdown || '');
+      const documentFragment = new DOMParser().parseFromString(`<div id="root">${html}</div>`, 'text/html');
+      const root = documentFragment.getElementById('root');
+      const segments = [];
+
+      appendInlineNodes(root, {}, segments);
+      return mergeAdjacentSegments(segments);
+    }
+
+    function appendInlineNodes(node, activeStyles, segments) {
+      Array.from(node.childNodes).forEach(child => {
+        if (child.nodeType === Node.TEXT_NODE) {
+          if (child.nodeValue) {
+            segments.push({ text: child.nodeValue, ...activeStyles });
+          }
+          return;
+        }
+
+        if (child.nodeType !== Node.ELEMENT_NODE) {
+          return;
+        }
+
+        const tagName = child.tagName.toLowerCase();
+        if (tagName === 'br') {
+          segments.push({ text: '\n', ...activeStyles });
+          return;
+        }
+
+        const nextStyles = { ...activeStyles };
+        if (tagName === 'strong' || tagName === 'b') {
+          nextStyles.bold = true;
+        }
+        if (tagName === 'em' || tagName === 'i') {
+          nextStyles.italic = true;
+        }
+        if (tagName === 'code') {
+          nextStyles.code = true;
+        }
+        if (tagName === 'del' || tagName === 's') {
+          nextStyles.strikethrough = true;
+        }
+        if (tagName === 'a') {
+          nextStyles.linkUrl = child.getAttribute('href') || '';
+        }
+
+        appendInlineNodes(child, nextStyles, segments);
+      });
+    }
+
+    function inlineSegmentsFromToken(token) {
+      return inlineSegmentsFromMarkdown(token?.text || '');
+    }
+
+    function normalizeTheme(lang) {
+      const parts = String(lang || '').trim().split(/\s+/).filter(Boolean);
+      return {
+        language: (parts[0] || '').toLowerCase(),
+        theme: (parts[1] || 'default').toLowerCase(),
+      };
+    }
+
+    function tokenizeMarkdown(markdown) {
+      return marked.lexer(markdown || '');
+    }
+
+    function markdownToBlocks(markdown) {
+      const tokens = tokenizeMarkdown(markdown);
+      const blocks = [];
+      appendBlocksFromTokens(tokens, blocks, 0, 0);
+      return blocks;
+    }
+
+    function blankParagraphCountFromSpaceToken(token) {
+      const raw = String(token?.raw || token?.text || '');
+      if (!raw) {
+        return 0;
+      }
+
+      const newlineCount = (raw.match(/\n/g) || []).length;
+      return Math.max(0, newlineCount - 1);
+    }
+
+    function appendBlocksFromTokens(tokens, blocks, quoteDepth, nestingLevel) {
+      (tokens || []).forEach(token => {
+        switch (token.type) {
+          case 'space':
+            for (let index = 0; index < blankParagraphCountFromSpaceToken(token); index += 1) {
+              blocks.push({
+                type: 'paragraph',
+                inlines: [],
+                quoteDepth,
+              });
+            }
+            break;
+          case 'paragraph':
+          case 'text':
+            blocks.push({
+              type: 'paragraph',
+              inlines: inlineSegmentsFromToken(token),
+              quoteDepth,
+            });
+            break;
+          case 'heading':
+            blocks.push({
+              type: 'heading',
+              level: token.depth || 1,
+              inlines: inlineSegmentsFromToken(token),
+              quoteDepth,
+            });
+            break;
+          case 'code': {
+            const info = normalizeTheme(token.lang);
+            if (info.language === 'mermaid') {
+              blocks.push({
+                type: 'mermaid',
+                source: String(token.text || '').trim(),
+                theme: info.theme,
+                quoteDepth,
+              });
+            } else {
+              blocks.push({
+                type: 'code',
+                text: String(token.text || ''),
+                language: String(token.lang || ''),
+                quoteDepth,
+              });
+            }
+            break;
+          }
+          case 'list':
+            appendListBlocks(token, blocks, quoteDepth, nestingLevel);
+            break;
+          case 'blockquote':
+            appendBlocksFromTokens(token.tokens || [], blocks, quoteDepth + 1, nestingLevel);
+            break;
+          case 'hr':
+            blocks.push({ type: 'rule', quoteDepth });
+            break;
+          default:
+            if (token.tokens) {
+              appendBlocksFromTokens(token.tokens, blocks, quoteDepth, nestingLevel);
+            }
+        }
+      });
+    }
+
+    function appendListBlocks(listToken, blocks, quoteDepth, nestingLevel) {
+      (listToken.items || []).forEach(item => {
+        const itemTokens = item.tokens || [];
+        const childListTokens = [];
+        const textTokens = [];
+        const extraBlocks = [];
+
+        itemTokens.forEach(token => {
+          if (token.type === 'list') {
+            childListTokens.push(token);
+          } else if (token.type === 'paragraph' || token.type === 'text') {
+            textTokens.push(token);
+          } else if (token.type !== 'space') {
+            extraBlocks.push(token);
+          }
+        });
+
+        const inlineSegments = textTokens.length
+          ? mergeAdjacentSegments(textTokens.flatMap((token, index) => {
+              const parts = inlineSegmentsFromToken(token);
+              if (index === 0) {
+                return parts;
+              }
+              return [{ text: '\n' }, ...parts];
+            }))
+          : inlineSegmentsFromMarkdown(item.text || '');
+
+        if (inlineSegments.length) {
+          blocks.push({
+            type: 'list_item',
+            ordered: !!listToken.ordered,
+            nestingLevel,
+            quoteDepth,
+            inlines: inlineSegments,
+          });
+        }
+
+        extraBlocks.forEach(token => {
+          appendBlocksFromTokens([token], blocks, quoteDepth, nestingLevel + 1);
+        });
+
+        childListTokens.forEach(token => {
+          appendListBlocks(token, blocks, quoteDepth, nestingLevel + 1);
+        });
+      });
+    }
+
+    function getScaling(svgElement) {
+      const frameConfig = sanitizeFrameConfig(IMAGE_FRAME);
+      const frameWidth = frameConfig.borderWidth + frameConfig.padding;
+      const { width, height } = svgElement.getBoundingClientRect();
+      const safeWidth = Math.max(width, 1);
+      const safeHeight = Math.max(height, 1);
+      const maxTotalDocWidth = Math.max(1, Math.min(DOC_MAX_DIMENSION, getDocumentImageMaxWidth()));
+      const maxContentDocWidth = Math.max(1, maxTotalDocWidth - frameWidth * 2);
+      const maxContentDocHeight = Math.max(1, DOC_MAX_DIMENSION - frameWidth * 2);
+      const displayScale = Math.min(1, maxContentDocWidth / safeWidth, maxContentDocHeight / safeHeight);
+      const docWidth = width * displayScale + frameWidth * 2;
+      const docHeight = height * displayScale + frameWidth * 2;
+      const maxDocDimension = Math.max(docWidth, docHeight, 1);
+      const qualityScale = Math.max(1, Math.min(EXPORT_QUALITY_MULTIPLIER, MAX_RASTER_DIMENSION / maxDocDimension));
+      const scale = displayScale * qualityScale;
+
+      return {
+        width,
+        height,
+        scale,
+        displayScale,
+        qualityScale,
+        frameConfig,
+        frameWidth,
+        maxTotalDocWidth,
+        docWidth,
+        docHeight,
+      };
+    }
+
+    function drawImageFrame(context, canvasWidth, canvasHeight, frameConfig, qualityScale) {
+      const borderWidth = frameConfig.borderWidth * qualityScale;
+      if (!borderWidth) {
+        return;
+      }
+
+      context.fillStyle = frameConfig.borderColor;
+      context.fillRect(0, 0, canvasWidth, canvasHeight);
+      context.clearRect(
+        borderWidth,
+        borderWidth,
+        Math.max(0, canvasWidth - borderWidth * 2),
+        Math.max(0, canvasHeight - borderWidth * 2)
+      );
+    }
+
+    function svgAsPng(svgElement) {
+      return new Promise((resolve, reject) => {
+        try {
+          const canvas = document.createElement('canvas');
+          const context = canvas.getContext('2d');
+          const loader = new Image();
+          const { width, height, scale, docWidth, docHeight, qualityScale, frameConfig, frameWidth } = getScaling(svgElement);
+          const contentWidthPx = width * scale;
+          const contentHeightPx = height * scale;
+          const frameOffsetPx = frameWidth * qualityScale;
+
+          svgElement.setAttribute('width', width);
+          svgElement.setAttribute('height', height);
+
+          canvas.width = Math.max(1, Math.round(docWidth * qualityScale));
+          canvas.height = Math.max(1, Math.round(docHeight * qualityScale));
+
+          loader.onload = () => {
+            drawImageFrame(context, canvas.width, canvas.height, frameConfig, qualityScale);
+            context.drawImage(loader, 0, 0, loader.width, loader.height, frameOffsetPx, frameOffsetPx, contentWidthPx, contentHeightPx);
+            resolve({
+              base64: canvas.toDataURL('image/png'),
+              width: docWidth,
+              height: docHeight,
+            });
+          };
+          loader.onerror = () => reject(new Error('Failed to convert Mermaid SVG into PNG.'));
+
+          const svgMarkup = new XMLSerializer().serializeToString(svgElement);
+          loader.src = 'data:image/svg+xml,' + encodeURIComponent(svgMarkup);
+        } catch (error) {
+          reject(error);
+        }
+      });
+    }
+
+    async function renderMermaidBlock(block) {
+      await mermaid.parse(block.source);
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: block.theme || 'default',
+      });
+
+      const renderId = `mermaid-paste-${++renderSequence}`;
+      const { svg } = await mermaid.render(renderId, block.source);
+      const wrapper = document.createElement('div');
+      wrapper.className = 'render-wrapper';
+      wrapper.innerHTML = svg;
+      renderHost.appendChild(wrapper);
+
+      const svgElement = wrapper.querySelector('svg');
+      if (!svgElement) {
+        wrapper.remove();
+        throw new Error('Mermaid did not return an SVG element.');
+      }
+
+      if (svgElement.style.maxWidth) {
+        svgElement.style.width = svgElement.style.maxWidth;
+      }
+
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      const png = await svgAsPng(svgElement);
+      wrapper.remove();
+      return png;
+    }
+
+    function summarizeMarkdown() {
+      const markdown = markdownInput.value;
+      if (!markdown.trim()) {
+        summaryNode.textContent = 'Paste markdown to insert styled text and Mermaid diagrams.';
+        setStatus('');
+        return;
+      }
+
+      try {
+        const blocks = markdownToBlocks(markdown);
+        const mermaidCount = blocks.filter(block => block.type === 'mermaid').length;
+        summaryNode.textContent = `${blocks.length} block${blocks.length === 1 ? '' : 's'} detected, ${mermaidCount} Mermaid diagram${mermaidCount === 1 ? '' : 's'}.`;
+        setStatus('');
+      } catch (error) {
+        summaryNode.textContent = 'Markdown could not be parsed yet.';
+        setStatus(error.message || String(error), true);
+      }
+    }
+
+    function callServer(functionName, ...args) {
+      return new Promise((resolve, reject) => {
+        if (!window.google?.script?.run) {
+          reject(new Error('Google Apps Script runtime is unavailable.'));
+          return;
+        }
+
+        window.google.script.run
+          .withSuccessHandler(resolve)
+          .withFailureHandler(error => reject(new Error(error && error.message ? error.message : String(error))))
+          [functionName](...args);
+      });
+    }
+
+    async function handleSubmit(event) {
+      event.preventDefault();
+      const markdown = markdownInput.value;
+      if (!markdown.trim()) {
+        setStatus('Paste some markdown first.', true);
+        return;
+      }
+
+      setBusy(true);
+      try {
+        setStatus('Persisting frame settings...');
+        await persistFrameConfig();
+
+        setStatus('Parsing markdown...');
+        const blocks = markdownToBlocks(markdown);
+        if (!blocks.length) {
+          throw new Error('No supported markdown content found.');
+        }
+
+        const mermaidBlocks = blocks.filter(block => block.type === 'mermaid');
+        for (let index = 0; index < mermaidBlocks.length; index += 1) {
+          setStatus(`Rendering Mermaid ${index + 1} of ${mermaidBlocks.length}...`);
+          const rendered = await renderMermaidBlock(mermaidBlocks[index]);
+          Object.assign(mermaidBlocks[index], rendered);
+        }
+
+        setStatus('Inserting into Google Docs...');
+        const insertedCount = await callServer('insertMarkdownBlocks', blocks);
+        if (!insertedCount) {
+          throw new Error('Nothing was inserted.');
+        }
+        if (window.google?.script?.host) {
+          window.google.script.host.close();
+        }
+      } catch (error) {
+        setStatus(error.message || String(error), true);
+        setBusy(false);
+      }
+    }
+
+    async function handleClipboardPaste() {
+      if (!navigator.clipboard?.readText) {
+        setStatus('Clipboard access is unavailable here. Paste into the textarea manually.', true);
+        return;
+      }
+
+      try {
+        const text = await navigator.clipboard.readText();
+        markdownInput.value = text;
+        summarizeMarkdown();
+        markdownInput.focus();
+        setStatus('Clipboard loaded.');
+      } catch (error) {
+        setStatus('Clipboard access was blocked. Paste into the textarea manually.', true);
+      }
+    }
+
+    byId('form').addEventListener('submit', handleSubmit);
+    byId('cancel').addEventListener('click', () => {
+      if (window.google?.script?.host) {
+        window.google.script.host.close();
+      }
+    });
+    byId('clipboard').addEventListener('click', handleClipboardPaste);
+    byId('frameBorderWidth').addEventListener('change', () => {
+      persistFrameConfig().catch(error => setStatus(error.message || String(error), true));
+    });
+    byId('frameBorderColor').addEventListener('change', () => {
+      persistFrameConfig().catch(error => setStatus(error.message || String(error), true));
+    });
+    byId('framePadding').addEventListener('change', () => {
+      persistFrameConfig().catch(error => setStatus(error.message || String(error), true));
+    });
+    markdownInput.addEventListener('input', debounce(summarizeMarkdown, 120));
+
+    callServer('getImageFrameConfig')
+      .then(config => {
+        applyFrameConfig(config || FRAME_DEFAULTS);
+        summarizeMarkdown();
+        markdownInput.focus();
+      })
+      .catch(error => {
+        applyFrameConfig(FRAME_DEFAULTS);
+        setStatus(error.message || String(error), true);
+        summarizeMarkdown();
+        markdownInput.focus();
+      });
+  </script>
+
+  <style>
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: linear-gradient(180deg, #f6f7f3 0%, #edf2ea 100%);
+      color: #1f1f1f;
+      font-family: Georgia, 'Times New Roman', serif;
+    }
+
+    #form {
+      box-sizing: border-box;
+      display: grid;
+      grid-template-rows: auto auto auto minmax(0, 1fr) auto auto;
+      gap: 12px;
+      height: 100%;
+      padding: 20px;
+      min-height: 0;
+    }
+
+    .toolbar,
+    .buttons {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    #summary {
+      color: #4a5a50;
+      font-size: 13px;
+      text-align: right;
+    }
+
+    label {
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      color: #3d4d42;
+    }
+
+    .frame-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      font-size: 13px;
+      color: #3d4d42;
+      max-height: 72px;
+      overflow: hidden;
+    }
+
+    .frame-controls label {
+      margin-right: 2px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      text-transform: none;
+    }
+
+    .frame-controls input[type="number"] {
+      width: 58px !important;
+      min-width: 58px;
+      max-width: 58px;
+      flex: 0 0 58px;
+      height: 28px;
+      box-sizing: border-box;
+      margin-right: 8px;
+    }
+
+    .frame-controls input[type="color"] {
+      width: 34px !important;
+      min-width: 34px;
+      max-width: 34px;
+      flex: 0 0 34px;
+      height: 28px;
+      padding: 0;
+      margin-right: 8px;
+    }
+
+    #markdown {
+      min-height: 320px;
+    }
+
+    #markdown {
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      resize: none;
+      border: 1px solid #b9c6ba;
+      border-radius: 14px;
+      padding: 16px 18px;
+      background: rgba(255, 255, 255, 0.88);
+      font: 14px/1.55 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+      box-shadow: inset 0 1px 2px rgba(25, 40, 30, 0.08);
+    }
+
+    #markdown:focus {
+      outline: none;
+      border-color: #56785d;
+      box-shadow: 0 0 0 3px rgba(86, 120, 93, 0.18);
+    }
+
+    button {
+      border-radius: 999px;
+    }
+
+    #status {
+      min-height: 18px;
+      color: #35533f;
+      font-size: 13px;
+    }
+
+    #status.error {
+      color: #a12d2f;
+    }
+
+    #renderHost {
+      position: fixed;
+      top: -10000px;
+      left: -10000px;
+      visibility: hidden;
+      pointer-events: none;
+    }
+
+    .render-wrapper {
+      display: inline-block;
+      padding: 8px;
+      background: #fff;
+    }
+  </style>
+</body>
+</html>
