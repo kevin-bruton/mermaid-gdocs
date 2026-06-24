@@ -1,6 +1,7 @@
 # mermaid-gdocs
 [Mermaidsjs](https://mermaidjs.github.io/) wrapper for google docs
 
+Original project (now archived): https://github.com/renanlecaro/mermaid-gdocs
 
 # known limitations
 
