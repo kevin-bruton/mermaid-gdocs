@@ -14,6 +14,10 @@
 
     <label for="markdown">Markdown</label>
     <div class="frame-controls">
+      <label for="theme">Theme</label>
+      <select id="theme">
+        <option value="__markdown__">From markdown/default</option>
+      </select>
       <label for="frameBorderWidth">Border</label>
       <input id="frameBorderWidth" type="number" min="0" max="24" step="1" value="1" />
       <label for="frameBorderColor">Color</label>
@@ -37,6 +41,12 @@
     import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
     import { marked } from 'https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js';
 
+    // Non-blocking: ELK layout engine for %%{init: {'layout': 'elk'}}%% diagrams.
+    // Dynamic import so a CSP/sandbox failure here doesn't break the rest of the app.
+    import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0/dist/mermaid-layout-elk.esm.min.mjs')
+      .then(m => mermaid.registerLayoutLoaders(m.default ?? m))
+      .catch(() => {});
+
     const DOC_MAX_DIMENSION = 1600;
     const MAX_RASTER_DIMENSION = 1600;
     const EXPORT_QUALITY_MULTIPLIER = 2;
@@ -50,6 +60,133 @@
     const IMAGE_FRAME = {
       ...FRAME_DEFAULTS,
     };
+
+    const PASTE_THEME_FROM_MARKDOWN = '__markdown__';
+    const BUILT_IN_THEME_FALLBACKS = [
+      { id: 'default', name: 'Default', mermaidTheme: 'default' },
+      { id: 'forest', name: 'Forest', mermaidTheme: 'forest' },
+      { id: 'dark', name: 'Dark', mermaidTheme: 'dark' },
+      { id: 'neutral', name: 'Neutral', mermaidTheme: 'neutral' },
+      { id: 'base', name: 'Base', mermaidTheme: 'base' },
+    ];
+
+    let mermaidThemeData = normalizeMermaidThemeData(window.mermaidThemeDataFromGoogle);
+
+    function normalizeThemeId(themeId) {
+      return String(themeId || '').trim().toLowerCase();
+    }
+
+    function normalizeMermaidThemeData(config = {}) {
+      const builtInThemes = Array.isArray(config?.builtInThemes) && config.builtInThemes.length
+        ? config.builtInThemes
+        : BUILT_IN_THEME_FALLBACKS;
+      const customThemes = Array.isArray(config?.customThemes)
+        ? config.customThemes
+        : [];
+
+      return {
+        builtInThemes: builtInThemes.map(theme => ({
+          id: normalizeThemeId(theme.id),
+          name: String(theme.name || theme.id || '').trim() || 'Theme',
+          mermaidTheme: normalizeThemeId(theme.mermaidTheme || theme.id || 'default'),
+          custom: false,
+        })),
+        customThemes: customThemes
+          .filter(theme => normalizeThemeId(theme.id).startsWith('custom:'))
+          .map(theme => ({
+            id: normalizeThemeId(theme.id),
+            name: String(theme.name || theme.id || '').trim() || 'Custom theme',
+            mermaidTheme: 'base',
+            themeVariables: theme.themeVariables && typeof theme.themeVariables === 'object'
+              ? theme.themeVariables
+              : {},
+            custom: true,
+          })),
+      };
+    }
+
+    function getThemeDefinitions() {
+      return [
+        ...mermaidThemeData.builtInThemes,
+        ...mermaidThemeData.customThemes,
+      ];
+    }
+
+    function resolveThemeId(themeId, fallbackThemeId = 'default') {
+      const normalizedThemeId = normalizeThemeId(themeId);
+      const aliasedThemeId = normalizedThemeId && !normalizedThemeId.startsWith('custom:')
+        ? 'custom:' + normalizedThemeId
+        : normalizedThemeId;
+      const themeDefinition = getThemeDefinitions().find(definition => definition.id === normalizedThemeId)
+        || getThemeDefinitions().find(definition => definition.id === aliasedThemeId);
+
+      return themeDefinition ? themeDefinition.id : fallbackThemeId;
+    }
+
+    function getThemeDefinition(themeId) {
+      const resolvedThemeId = resolveThemeId(themeId);
+      return getThemeDefinitions().find(themeDefinition => themeDefinition.id === resolvedThemeId)
+        || mermaidThemeData.builtInThemes.find(themeDefinition => themeDefinition.id === 'default')
+        || BUILT_IN_THEME_FALLBACKS[0];
+    }
+
+    function getMermaidRenderConfig(themeId) {
+      const themeDefinition = getThemeDefinition(themeId);
+      const config = {
+        startOnLoad: false,
+        theme: themeDefinition.custom ? 'base' : (themeDefinition.mermaidTheme || themeDefinition.id || 'default'),
+      };
+
+      if (themeDefinition.custom) {
+        config.themeVariables = { ...(themeDefinition.themeVariables || {}) };
+      }
+
+      return config;
+    }
+
+    function addThemeOption(parent, themeDefinition, suffix = ' theme') {
+      const option = document.createElement('option');
+      option.value = themeDefinition.id;
+      option.textContent = themeDefinition.name + suffix;
+      parent.appendChild(option);
+    }
+
+    function populateThemeSelect(preferredThemeId = PASTE_THEME_FROM_MARKDOWN) {
+      const select = byId('theme');
+      const normalizedPreferredThemeId = normalizeThemeId(preferredThemeId || PASTE_THEME_FROM_MARKDOWN);
+      const resolvedPreferredThemeId = normalizedPreferredThemeId === PASTE_THEME_FROM_MARKDOWN
+        ? PASTE_THEME_FROM_MARKDOWN
+        : resolveThemeId(normalizedPreferredThemeId);
+      select.innerHTML = '';
+
+      const markdownOption = document.createElement('option');
+      markdownOption.value = PASTE_THEME_FROM_MARKDOWN;
+      markdownOption.textContent = 'From markdown/default';
+      select.appendChild(markdownOption);
+
+      mermaidThemeData.builtInThemes.forEach(themeDefinition => {
+        addThemeOption(select, themeDefinition);
+      });
+
+      if (mermaidThemeData.customThemes.length) {
+        const customGroup = document.createElement('optgroup');
+        customGroup.label = 'Custom themes';
+        mermaidThemeData.customThemes.forEach(themeDefinition => {
+          addThemeOption(customGroup, themeDefinition, '');
+        });
+        select.appendChild(customGroup);
+      }
+
+      const hasPreferredTheme = resolvedPreferredThemeId === PASTE_THEME_FROM_MARKDOWN
+        || getThemeDefinitions().some(themeDefinition => themeDefinition.id === resolvedPreferredThemeId);
+      select.value = hasPreferredTheme ? resolvedPreferredThemeId : PASTE_THEME_FROM_MARKDOWN;
+      return select.value;
+    }
+
+    function getPasteThemeOverride() {
+      const selectedTheme = normalizeThemeId(byId('theme').value);
+      return selectedTheme && selectedTheme !== PASTE_THEME_FROM_MARKDOWN ? selectedTheme : '';
+    }
 
     function getDocumentImageMaxWidth() {
       const maxWidth = Number(window.mermaidImageLayoutFromGoogle?.maxWidth);
@@ -81,6 +218,7 @@
       submitButton.disabled = isBusy;
       byId('cancel').disabled = isBusy;
       byId('clipboard').disabled = isBusy;
+      byId('theme').disabled = isBusy;
       byId('frameBorderWidth').disabled = isBusy;
       byId('frameBorderColor').disabled = isBusy;
       byId('framePadding').disabled = isBusy;
@@ -153,6 +291,8 @@
           && previous.italic === segment.italic
           && previous.code === segment.code
           && previous.strikethrough === segment.strikethrough
+          && previous.superscript === segment.superscript
+          && previous.subscript === segment.subscript
           && previous.linkUrl === segment.linkUrl;
 
         if (sameStyle) {
@@ -207,6 +347,14 @@
         if (tagName === 'del' || tagName === 's') {
           nextStyles.strikethrough = true;
         }
+        if (tagName === 'sup') {
+          nextStyles.superscript = true;
+          nextStyles.subscript = false;
+        }
+        if (tagName === 'sub') {
+          nextStyles.subscript = true;
+          nextStyles.superscript = false;
+        }
         if (tagName === 'a') {
           nextStyles.linkUrl = child.getAttribute('href') || '';
         }
@@ -223,7 +371,7 @@
       const parts = String(lang || '').trim().split(/\s+/).filter(Boolean);
       return {
         language: (parts[0] || '').toLowerCase(),
-        theme: (parts[1] || 'default').toLowerCase(),
+        theme: normalizeThemeId(parts[1] || ''),
       };
     }
 
@@ -301,6 +449,9 @@
           case 'blockquote':
             appendBlocksFromTokens(token.tokens || [], blocks, quoteDepth + 1, nestingLevel);
             break;
+          case 'table':
+            blocks.push(markdownTableTokenToBlock(token, quoteDepth));
+            break;
           case 'hr':
             blocks.push({ type: 'rule', quoteDepth });
             break;
@@ -357,6 +508,48 @@
           appendListBlocks(token, blocks, quoteDepth, nestingLevel + 1);
         });
       });
+    }
+
+    function markdownTableTokenToBlock(token, quoteDepth) {
+      const alignments = Array.isArray(token?.align)
+        ? token.align.map(value => String(value || '').toLowerCase())
+        : [];
+
+      const header = (token?.header || []).map((cell, columnIndex) => {
+        const inlines = inlineSegmentsFromTableCell(cell);
+        return {
+          inlines: inlines.map(segment => ({ ...segment, bold: true })),
+          align: alignments[columnIndex] || '',
+        };
+      });
+
+      const rows = (token?.rows || []).map(row => {
+        return (row || []).map((cell, columnIndex) => {
+          return {
+            inlines: inlineSegmentsFromTableCell(cell),
+            align: alignments[columnIndex] || '',
+          };
+        });
+      });
+
+      return {
+        type: 'table',
+        quoteDepth,
+        header,
+        rows,
+      };
+    }
+
+    function inlineSegmentsFromTableCell(cell) {
+      if (!cell) {
+        return [];
+      }
+
+      if (Array.isArray(cell.tokens) && cell.tokens.length) {
+        return mergeAdjacentSegments(cell.tokens.flatMap(token => inlineSegmentsFromToken(token)));
+      }
+
+      return inlineSegmentsFromMarkdown(cell.text || '');
     }
 
     function getScaling(svgElement) {
@@ -443,10 +636,8 @@
 
     async function renderMermaidBlock(block) {
       await mermaid.parse(block.source);
-      mermaid.initialize({
-        startOnLoad: false,
-        theme: block.theme || 'default',
-      });
+      block.theme = resolveThemeId(block.theme || 'default');
+      mermaid.initialize(getMermaidRenderConfig(block.theme || 'default'));
 
       const renderId = `mermaid-paste-${++renderSequence}`;
       const { svg } = await mermaid.render(renderId, block.source);
@@ -523,7 +714,14 @@
           throw new Error('No supported markdown content found.');
         }
 
+        const themeOverride = getPasteThemeOverride();
         const mermaidBlocks = blocks.filter(block => block.type === 'mermaid');
+        if (themeOverride) {
+          mermaidBlocks.forEach(block => {
+            block.theme = themeOverride;
+          });
+        }
+
         for (let index = 0; index < mermaidBlocks.length; index += 1) {
           setStatus(`Rendering Mermaid ${index + 1} of ${mermaidBlocks.length}...`);
           const rendered = await renderMermaidBlock(mermaidBlocks[index]);
@@ -568,6 +766,9 @@
       }
     });
     byId('clipboard').addEventListener('click', handleClipboardPaste);
+    byId('theme').addEventListener('change', event => {
+      localStorage.setItem('favorite-paste-theme', event.target.value);
+    });
     byId('frameBorderWidth').addEventListener('change', () => {
       persistFrameConfig().catch(error => setStatus(error.message || String(error), true));
     });
@@ -579,14 +780,22 @@
     });
     markdownInput.addEventListener('input', debounce(summarizeMarkdown, 120));
 
-    callServer('getImageFrameConfig')
-      .then(config => {
-        applyFrameConfig(config || FRAME_DEFAULTS);
+    Promise.all([
+      callServer('getImageFrameConfig').catch(() => null),
+      callServer('getMermaidThemeConfig').catch(() => null),
+    ])
+      .then(([frameConfig, themeConfig]) => {
+        if (themeConfig) {
+          mermaidThemeData = normalizeMermaidThemeData(themeConfig);
+        }
+        applyFrameConfig(frameConfig || FRAME_DEFAULTS);
+        populateThemeSelect(localStorage.getItem('favorite-paste-theme') || PASTE_THEME_FROM_MARKDOWN);
         summarizeMarkdown();
         markdownInput.focus();
       })
       .catch(error => {
         applyFrameConfig(FRAME_DEFAULTS);
+        populateThemeSelect(PASTE_THEME_FROM_MARKDOWN);
         setStatus(error.message || String(error), true);
         summarizeMarkdown();
         markdownInput.focus();
@@ -662,6 +871,13 @@
       flex: 0 0 58px;
       height: 28px;
       box-sizing: border-box;
+      margin-right: 8px;
+    }
+
+    .frame-controls select {
+      width: 190px;
+      max-width: 100%;
+      height: 28px;
       margin-right: 8px;
     }
 

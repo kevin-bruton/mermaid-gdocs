@@ -4,6 +4,29 @@
 var MERMAID_IMAGE_MAX_WIDTH_RATIO = 1;
 var DOCUMENT_POINTS_TO_IMAGE_PIXELS = 2;
 var DEFAULT_DOCUMENT_CONTENT_WIDTH = 1200;
+var MERMAID_CUSTOM_THEMES_PROPERTY = 'mermaidCustomThemes';
+var MERMAID_THEME_STORAGE_MAX_LENGTH = 8000;
+var MERMAID_THEME_NAME_MAX_LENGTH = 60;
+var MERMAID_THEME_VARIABLES_MAX_KEYS = 150;
+var MERMAID_THEME_VARIABLE_STRING_MAX_LENGTH = 500;
+var MERMAID_BUILT_IN_THEMES = [
+  { id: 'default', name: 'Default', mermaidTheme: 'default' },
+  { id: 'forest', name: 'Forest', mermaidTheme: 'forest' },
+  { id: 'dark', name: 'Dark', mermaidTheme: 'dark' },
+  { id: 'neutral', name: 'Neutral', mermaidTheme: 'neutral' },
+  { id: 'base', name: 'Base', mermaidTheme: 'base' },
+];
+var MARKDOWN_TABLE_STYLE = {
+  borderColor: '#dadce0',
+  borderWidth: 1,
+  headerBackground: '#e8eaed',
+  headerTextColor: '#202124',
+  bodyTextColor: '#3c4043',
+  zebraBackground: '#fdfdfe',
+  fontSize: 10,
+  lineSpacing: 1.15,
+  paragraphSpacing: 2,
+};
 
 function onInstall() {
   onOpen(); 
@@ -15,6 +38,7 @@ function onOpen() {
     .addItem('New chart', 'addNewChart')
     .addItem('Edit selected chart', 'editSelectedChart')
     .addItem('Paste from markdown', 'openPasteMarkdownDialog')
+    .addItem('Manage themes', 'openThemeDialog')
     .addToUi();
 }
 
@@ -60,7 +84,8 @@ function openDialog(source,label,theme, currentWidth=0) {
     .setWidth(3000)
     .setHeight(2000)
     .append(`<script>
-      window.graphDataFromGoogle=${JSON.stringify({source,label,theme, currentWidth, maxImageWidth: imageLayout.maxWidth, maxImageWidthRatio: imageLayout.widthRatio})}
+      window.graphDataFromGoogle=${jsonForHtml_({source,label,theme, currentWidth, maxImageWidth: imageLayout.maxWidth, maxImageWidthRatio: imageLayout.widthRatio})}
+      window.mermaidThemeDataFromGoogle=${jsonForHtml_(getMermaidThemeConfig())}
     </script>`) ;
 
 
@@ -74,11 +99,267 @@ function openPasteMarkdownDialog() {
     .setWidth(960)
     .setHeight(720)
     .append(`<script>
-      window.mermaidImageLayoutFromGoogle=${JSON.stringify(imageLayout)}
+      window.mermaidImageLayoutFromGoogle=${jsonForHtml_(imageLayout)}
+      window.mermaidThemeDataFromGoogle=${jsonForHtml_(getMermaidThemeConfig())}
     </script>`);
 
   DocumentApp.getUi()
     .showModalDialog(html, 'Paste from markdown');
+}
+
+function openThemeDialog() {
+  var html = HtmlService.createHtmlOutputFromFile('theme_settings')
+    .setWidth(720)
+    .setHeight(620)
+    .append(`<script>
+      window.mermaidThemeDataFromGoogle=${jsonForHtml_(getMermaidThemeConfig())}
+    </script>`);
+
+  DocumentApp.getUi()
+    .showModalDialog(html, 'Mermaid themes');
+}
+
+function jsonForHtml_(value) {
+  return JSON.stringify(value).replace(/</g, '\\u003c');
+}
+
+function getMermaidThemeConfig() {
+  var customThemes = getMermaidCustomThemes_();
+  return {
+    builtInThemes: MERMAID_BUILT_IN_THEMES.map(function(theme) {
+      return {
+        id: theme.id,
+        name: theme.name,
+        mermaidTheme: theme.mermaidTheme,
+        custom: false,
+      };
+    }),
+    customThemes: customThemes,
+    themes: MERMAID_BUILT_IN_THEMES.map(function(theme) {
+      return {
+        id: theme.id,
+        name: theme.name,
+        mermaidTheme: theme.mermaidTheme,
+        custom: false,
+      };
+    }).concat(customThemes.map(function(theme) {
+      return {
+        id: theme.id,
+        name: theme.name,
+        mermaidTheme: 'base',
+        themeVariables: theme.themeVariables,
+        custom: true,
+      };
+    })),
+  };
+}
+
+function saveMermaidCustomTheme(theme) {
+  var existingThemes = getMermaidCustomThemes_();
+  var name = sanitizeMermaidThemeName_(theme && theme.name);
+  var themeVariables = sanitizeMermaidThemeVariables_(theme && theme.themeVariables);
+  var requestedId = sanitizeMermaidCustomThemeId_(theme && theme.id);
+  var id = requestedId || createUniqueMermaidThemeId_(name, existingThemes);
+  var savedTheme = {
+    id: id,
+    name: name,
+    themeVariables: themeVariables,
+  };
+  var didReplace = false;
+
+  existingThemes = existingThemes.map(function(existingTheme) {
+    if (existingTheme.id === id) {
+      didReplace = true;
+      return savedTheme;
+    }
+    return existingTheme;
+  });
+
+  if (!didReplace) {
+    if (existingThemes.some(function(existingTheme) { return existingTheme.id === id; })) {
+      savedTheme.id = createUniqueMermaidThemeId_(name, existingThemes);
+    }
+    existingThemes.push(savedTheme);
+  }
+
+  persistMermaidCustomThemes_(existingThemes);
+  return {
+    savedTheme: savedTheme,
+    config: getMermaidThemeConfig(),
+  };
+}
+
+function deleteMermaidCustomTheme(id) {
+  var themeId = sanitizeMermaidCustomThemeId_(id);
+  if (!themeId) {
+    throw new Error('Select a custom theme to delete.');
+  }
+
+  var themes = getMermaidCustomThemes_().filter(function(theme) {
+    return theme.id !== themeId;
+  });
+
+  persistMermaidCustomThemes_(themes);
+  return getMermaidThemeConfig();
+}
+
+function getMermaidCustomThemes_() {
+  var stored = PropertiesService.getUserProperties().getProperty(MERMAID_CUSTOM_THEMES_PROPERTY);
+  if (!stored) {
+    return [];
+  }
+
+  try {
+    var parsed = JSON.parse(stored);
+    var themes = Array.isArray(parsed) ? parsed : parsed.themes;
+    if (!Array.isArray(themes)) {
+      return [];
+    }
+
+    return themes.map(function(theme) {
+      try {
+        return sanitizeStoredMermaidCustomTheme_(theme);
+      } catch (e) {
+        return null;
+      }
+    }).filter(function(theme) {
+      return !!theme;
+    });
+  } catch (e) {
+    return [];
+  }
+}
+
+function sanitizeStoredMermaidCustomTheme_(theme) {
+  var name = sanitizeMermaidThemeName_(theme && theme.name);
+  var id = sanitizeMermaidCustomThemeId_(theme && theme.id) || createMermaidCustomThemeId_(name);
+
+  return {
+    id: id,
+    name: name,
+    themeVariables: sanitizeMermaidThemeVariables_(theme && theme.themeVariables),
+  };
+}
+
+function sanitizeMermaidThemeName_(name) {
+  var sanitizedName = String(name || '').replace(/\s+/g, ' ').trim();
+  if (!sanitizedName) {
+    throw new Error('Theme name is required.');
+  }
+  if (sanitizedName.length > MERMAID_THEME_NAME_MAX_LENGTH) {
+    throw new Error('Theme name must be ' + MERMAID_THEME_NAME_MAX_LENGTH + ' characters or less.');
+  }
+  return sanitizedName;
+}
+
+function sanitizeMermaidCustomThemeId_(id) {
+  var themeId = String(id || '').trim().toLowerCase();
+  if (!themeId) {
+    return '';
+  }
+  if (!/^custom:[a-z0-9]+(?:-[a-z0-9]+)*$/.test(themeId)) {
+    return '';
+  }
+  return themeId;
+}
+
+function createMermaidCustomThemeId_(name) {
+  var slug = String(name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  if (!slug) {
+    slug = 'theme';
+  }
+
+  return 'custom:' + slug;
+}
+
+function createUniqueMermaidThemeId_(name, existingThemes) {
+  var baseId = createMermaidCustomThemeId_(name);
+  var id = baseId;
+  var suffix = 2;
+  var existingIds = {};
+
+  (existingThemes || []).forEach(function(theme) {
+    existingIds[theme.id] = true;
+  });
+
+  while (existingIds[id]) {
+    id = baseId + '-' + suffix;
+    suffix += 1;
+  }
+
+  return id;
+}
+
+function sanitizeMermaidThemeVariables_(themeVariables) {
+  var variables = themeVariables;
+  if (typeof variables === 'string') {
+    try {
+      variables = JSON.parse(variables);
+    } catch (e) {
+      throw new Error('Theme variables must be valid JSON.');
+    }
+  }
+
+  if (!variables || typeof variables !== 'object' || Array.isArray(variables)) {
+    throw new Error('Theme variables must be a JSON object.');
+  }
+
+  var sanitized = {};
+  var keys = Object.keys(variables);
+  if (keys.length > MERMAID_THEME_VARIABLES_MAX_KEYS) {
+    throw new Error('Theme variables cannot contain more than ' + MERMAID_THEME_VARIABLES_MAX_KEYS + ' keys.');
+  }
+
+  keys.forEach(function(key) {
+    var sanitizedKey = String(key || '').trim();
+    var value = variables[key];
+
+    if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(sanitizedKey)) {
+      throw new Error('Theme variable "' + key + '" is not a valid Mermaid variable name.');
+    }
+
+    if (typeof value === 'string') {
+      if (value.length > MERMAID_THEME_VARIABLE_STRING_MAX_LENGTH) {
+        throw new Error('Theme variable "' + sanitizedKey + '" is too long.');
+      }
+      sanitized[sanitizedKey] = value;
+      return;
+    }
+
+    if (typeof value === 'number') {
+      if (!isFinite(value)) {
+        throw new Error('Theme variable "' + sanitizedKey + '" must be a finite number.');
+      }
+      sanitized[sanitizedKey] = value;
+      return;
+    }
+
+    if (typeof value === 'boolean') {
+      sanitized[sanitizedKey] = value;
+      return;
+    }
+
+    throw new Error('Theme variable "' + sanitizedKey + '" must be a string, number, or boolean.');
+  });
+
+  return sanitized;
+}
+
+function persistMermaidCustomThemes_(themes) {
+  var sanitizedThemes = (themes || []).map(function(theme) {
+    return sanitizeStoredMermaidCustomTheme_(theme);
+  });
+  var serialized = JSON.stringify(sanitizedThemes);
+
+  if (serialized.length > MERMAID_THEME_STORAGE_MAX_LENGTH) {
+    throw new Error('Theme storage is full. Delete unused themes or reduce theme variables.');
+  }
+
+  PropertiesService.getUserProperties().setProperty(MERMAID_CUSTOM_THEMES_PROPERTY, serialized);
 }
 
 function getDocumentImageLayoutConfig() {
@@ -320,6 +601,8 @@ function insertMarkdownBlock_(body, index, block) {
       return insertMarkdownCodeBlock_(body, index, block);
     case 'mermaid':
       return insertMarkdownMermaidBlock_(body, index, block);
+    case 'table':
+      return insertMarkdownTable_(body, index, block);
     case 'rule':
       return insertMarkdownRule_(body, index, block);
     default:
@@ -515,6 +798,167 @@ function insertMarkdownRule_(body, index, block) {
   return index + 1;
 }
 
+function insertMarkdownTable_(body, index, block) {
+  var headerCells = normalizeMarkdownTableCells_(block.header || []);
+  var bodyRows = (block.rows || []).map(function(row) {
+    return normalizeMarkdownTableCells_(row || []);
+  });
+
+  var rows = [];
+  if (headerCells.length) {
+    rows.push(headerCells);
+  }
+
+  bodyRows.forEach(function(row) {
+    rows.push(row);
+  });
+
+  if (!rows.length) {
+    return index;
+  }
+
+  var maxColumns = rows.reduce(function(max, row) {
+    return Math.max(max, row.length);
+  }, 0);
+
+  if (!maxColumns) {
+    return index;
+  }
+
+  rows = rows.map(function(row) {
+    var normalized = row.slice();
+    while (normalized.length < maxColumns) {
+      normalized.push({ inlines: [], align: '' });
+    }
+    return normalized;
+  });
+
+  var tableText = rows.map(function(row) {
+    return row.map(function(cell) {
+      return buildInlineText_(cell.inlines || []);
+    });
+  });
+
+  var table = body.insertTable(index, tableText);
+  applyMarkdownTableStyle_(table, rows.length, maxColumns);
+
+  for (var rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    for (var columnIndex = 0; columnIndex < rows[rowIndex].length; columnIndex += 1) {
+      var cellData = rows[rowIndex][columnIndex] || { inlines: [], align: '' };
+      var cell = table.getCell(rowIndex, columnIndex);
+      var text = cell.editAsText();
+      applyMarkdownTableCellTypography_(text, rowIndex === 0);
+      applyInlineStyles_(text, cellData.inlines || []);
+      applyMarkdownTableCellAlignment_(cell, cellData.align);
+    }
+  }
+
+  return index + 1;
+}
+
+function normalizeMarkdownTableCells_(cells) {
+  return (cells || []).map(function(cell) {
+    return {
+      inlines: cell && cell.inlines ? cell.inlines : [],
+      align: cell && cell.align ? String(cell.align).toLowerCase() : '',
+    };
+  });
+}
+
+function applyMarkdownTableStyle_(table, rowCount, columnCount) {
+  if (!table) {
+    return;
+  }
+
+  if (typeof table.setBorderColor === 'function') {
+    table.setBorderColor(MARKDOWN_TABLE_STYLE.borderColor);
+  }
+  if (typeof table.setBorderWidth === 'function') {
+    table.setBorderWidth(MARKDOWN_TABLE_STYLE.borderWidth);
+  }
+
+  for (var rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+    for (var columnIndex = 0; columnIndex < columnCount; columnIndex += 1) {
+      applyMarkdownTableCellVisualStyle_(table.getCell(rowIndex, columnIndex), rowIndex);
+    }
+  }
+}
+
+function applyMarkdownTableCellVisualStyle_(tableCell, rowIndex) {
+  if (!tableCell) {
+    return;
+  }
+
+  if (typeof tableCell.setBackgroundColor === 'function') {
+    if (rowIndex === 0) {
+      tableCell.setBackgroundColor(MARKDOWN_TABLE_STYLE.headerBackground);
+    } else if (rowIndex % 2 === 0) {
+      tableCell.setBackgroundColor(MARKDOWN_TABLE_STYLE.zebraBackground);
+    }
+  }
+
+  var numChildren = tableCell.getNumChildren();
+  for (var childIndex = 0; childIndex < numChildren; childIndex += 1) {
+    var child = tableCell.getChild(childIndex);
+    if (child.getType() === DocumentApp.ElementType.PARAGRAPH) {
+      var paragraph = child.asParagraph();
+      if (typeof paragraph.setSpacingBefore === 'function') {
+        paragraph.setSpacingBefore(MARKDOWN_TABLE_STYLE.paragraphSpacing);
+      }
+      if (typeof paragraph.setSpacingAfter === 'function') {
+        paragraph.setSpacingAfter(MARKDOWN_TABLE_STYLE.paragraphSpacing);
+      }
+      if (typeof paragraph.setLineSpacing === 'function') {
+        paragraph.setLineSpacing(MARKDOWN_TABLE_STYLE.lineSpacing);
+      }
+    }
+  }
+}
+
+function applyMarkdownTableCellTypography_(textElement, isHeaderRow) {
+  var textValue = textElement.getText();
+  if (!textValue) {
+    return;
+  }
+
+  var end = textValue.length - 1;
+  textElement.setFontSize(0, end, MARKDOWN_TABLE_STYLE.fontSize);
+  textElement.setForegroundColor(
+    0,
+    end,
+    isHeaderRow ? MARKDOWN_TABLE_STYLE.headerTextColor : MARKDOWN_TABLE_STYLE.bodyTextColor
+  );
+
+  if (isHeaderRow) {
+    textElement.setBold(0, end, true);
+  }
+}
+
+function applyMarkdownTableCellAlignment_(tableCell, alignment) {
+  var targetAlignment = null;
+  switch (String(alignment || '').toLowerCase()) {
+    case 'left':
+      targetAlignment = DocumentApp.HorizontalAlignment.LEFT;
+      break;
+    case 'center':
+      targetAlignment = DocumentApp.HorizontalAlignment.CENTER;
+      break;
+    case 'right':
+      targetAlignment = DocumentApp.HorizontalAlignment.RIGHT;
+      break;
+    default:
+      return;
+  }
+
+  var numChildren = tableCell.getNumChildren();
+  for (var childIndex = 0; childIndex < numChildren; childIndex += 1) {
+    var child = tableCell.getChild(childIndex);
+    if (child.getType() === DocumentApp.ElementType.PARAGRAPH) {
+      child.asParagraph().setAlignment(targetAlignment);
+    }
+  }
+}
+
 function createPngBlobFromBase64_(base64) {
   var parts = String(base64 || '').split(',');
   var data = parts.length > 1 ? parts[1] : parts[0];
@@ -581,6 +1025,11 @@ function applyInlineStyles_(textElement, inlines) {
     if (inline.code) {
       textElement.setFontFamily(start, end, 'Courier New');
       textElement.setBackgroundColor(start, end, '#f1f3f4');
+    }
+    if (inline.superscript) {
+      textElement.setTextAlignment(start, end, DocumentApp.TextAlignment.SUPERSCRIPT);
+    } else if (inline.subscript) {
+      textElement.setTextAlignment(start, end, DocumentApp.TextAlignment.SUBSCRIPT);
     }
 
     offset += text.length;

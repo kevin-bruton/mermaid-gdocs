@@ -20,6 +20,7 @@
             <option value="forest">Forest theme</option>
             <option value="dark">dark theme</option>
             <option value="neutral">neutral theme</option>
+            <option value="base">base theme</option>
         </select>
 
         <div id="frameControls" class="frame-controls">
@@ -45,6 +46,12 @@
 <script type="module">
     import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
 
+    // Non-blocking: ELK layout engine for %%{init: {'layout': 'elk'}}%% diagrams.
+    // Dynamic import so a CSP/sandbox failure here doesn't break the rest of the app.
+    import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0/dist/mermaid-layout-elk.esm.min.mjs')
+      .then(m => mermaid.registerLayoutLoaders(m.default ?? m))
+      .catch(() => {});
+
     const DOC_MAX_DIMENSION = 1600;
     const MAX_RASTER_DIMENSION = 1600;
     const EXPORT_QUALITY_MULTIPLIER = 2;
@@ -58,6 +65,118 @@
     const IMAGE_FRAME = {
         ...FRAME_DEFAULTS,
     };
+
+    const BUILT_IN_THEME_FALLBACKS = [
+        { id: 'default', name: 'Default', mermaidTheme: 'default' },
+        { id: 'forest', name: 'Forest', mermaidTheme: 'forest' },
+        { id: 'dark', name: 'Dark', mermaidTheme: 'dark' },
+        { id: 'neutral', name: 'Neutral', mermaidTheme: 'neutral' },
+        { id: 'base', name: 'Base', mermaidTheme: 'base' },
+    ];
+
+    let mermaidThemeData = normalizeMermaidThemeData(window.mermaidThemeDataFromGoogle);
+
+    function normalizeThemeId(themeId) {
+        return String(themeId || '').trim().toLowerCase();
+    }
+
+    function normalizeMermaidThemeData(config = {}) {
+        const builtInThemes = Array.isArray(config?.builtInThemes) && config.builtInThemes.length
+            ? config.builtInThemes
+            : BUILT_IN_THEME_FALLBACKS;
+        const customThemes = Array.isArray(config?.customThemes)
+            ? config.customThemes
+            : [];
+
+        return {
+            builtInThemes: builtInThemes.map(theme => ({
+                id: normalizeThemeId(theme.id),
+                name: String(theme.name || theme.id || '').trim() || 'Theme',
+                mermaidTheme: normalizeThemeId(theme.mermaidTheme || theme.id || 'default'),
+                custom: false,
+            })),
+            customThemes: customThemes
+                .filter(theme => normalizeThemeId(theme.id).startsWith('custom:'))
+                .map(theme => ({
+                    id: normalizeThemeId(theme.id),
+                    name: String(theme.name || theme.id || '').trim() || 'Custom theme',
+                    mermaidTheme: 'base',
+                    themeVariables: theme.themeVariables && typeof theme.themeVariables === 'object'
+                        ? theme.themeVariables
+                        : {},
+                    custom: true,
+                })),
+        };
+    }
+
+    function getThemeDefinitions() {
+        return [
+            ...mermaidThemeData.builtInThemes,
+            ...mermaidThemeData.customThemes,
+        ];
+    }
+
+    function resolveThemeId(themeId, fallbackThemeId = 'default') {
+        const normalizedThemeId = normalizeThemeId(themeId);
+        const aliasedThemeId = normalizedThemeId && !normalizedThemeId.startsWith('custom:')
+            ? 'custom:' + normalizedThemeId
+            : normalizedThemeId;
+        const themeDefinition = getThemeDefinitions().find(definition => definition.id === normalizedThemeId)
+            || getThemeDefinitions().find(definition => definition.id === aliasedThemeId);
+
+        return themeDefinition ? themeDefinition.id : fallbackThemeId;
+    }
+
+    function getThemeDefinition(themeId) {
+        const resolvedThemeId = resolveThemeId(themeId);
+        return getThemeDefinitions().find(themeDefinition => themeDefinition.id === resolvedThemeId)
+            || mermaidThemeData.builtInThemes.find(themeDefinition => themeDefinition.id === 'default')
+            || BUILT_IN_THEME_FALLBACKS[0];
+    }
+
+    function getMermaidRenderConfig(themeId) {
+        const themeDefinition = getThemeDefinition(themeId);
+        const config = {
+            startOnLoad: false,
+            theme: themeDefinition.custom ? 'base' : (themeDefinition.mermaidTheme || themeDefinition.id || 'default'),
+        };
+
+        if (themeDefinition.custom) {
+            config.themeVariables = { ...(themeDefinition.themeVariables || {}) };
+        }
+
+        return config;
+    }
+
+    function addThemeOption(parent, themeDefinition, suffix = ' theme') {
+        const option = document.createElement('option');
+        option.value = themeDefinition.id;
+        option.textContent = themeDefinition.name + suffix;
+        parent.appendChild(option);
+    }
+
+    function populateThemeSelect(preferredThemeId) {
+        const select = byId('theme');
+        const resolvedPreferredThemeId = resolveThemeId(preferredThemeId || 'default');
+        select.innerHTML = '';
+
+        mermaidThemeData.builtInThemes.forEach(themeDefinition => {
+            addThemeOption(select, themeDefinition);
+        });
+
+        if (mermaidThemeData.customThemes.length) {
+            const customGroup = document.createElement('optgroup');
+            customGroup.label = 'Custom themes';
+            mermaidThemeData.customThemes.forEach(themeDefinition => {
+                addThemeOption(customGroup, themeDefinition, '');
+            });
+            select.appendChild(customGroup);
+        }
+
+        const hasPreferredTheme = getThemeDefinitions().some(themeDefinition => themeDefinition.id === resolvedPreferredThemeId);
+        select.value = hasPreferredTheme ? resolvedPreferredThemeId : 'default';
+        return select.value;
+    }
 
     function getDocumentImageMaxWidth() {
         const maxWidth = Number(window.graphDataFromGoogle?.maxImageWidth);
@@ -230,7 +349,7 @@
         });
     }
 
-    let theme = '';
+    let theme = 'default';
     const renderPreview = debounce(async function () {
 
         var source = byId('code').value.trim();
@@ -240,10 +359,7 @@
             byId('preview').setAttribute('data-processed', '');
             byId('preview').textContent = source;
 
-            await mermaid.initialize({
-                startOnLoad: false,
-                theme,
-            });
+            await mermaid.initialize(getMermaidRenderConfig(theme));
             await mermaid.init(undefined, byId('preview'));
             const svg=document.getElementsByTagName('svg')[0]
             // It's quite odd, the max width must be set by mermaid, and interacts oddly with display grid in ff
@@ -382,22 +498,24 @@
                 byId('submit').innerText = buttonLabel;
             }
 
+            const themeConfig = await callServer('getMermaidThemeConfig').catch(() => null);
+            if (themeConfig) {
+                mermaidThemeData = normalizeMermaidThemeData(themeConfig);
+            }
+
             const source=window.graphDataFromGoogle?.source || ''
-            theme=window.graphDataFromGoogle?.theme || localStorage.getItem('favorite-theme') || 'default'
+            const preferredTheme = window.graphDataFromGoogle?.theme || localStorage.getItem('favorite-theme') || 'default'
+            theme = populateThemeSelect(preferredTheme);
 
             const savedFrame = await callServer('getImageFrameConfig');
             applyFrameConfig(savedFrame || FRAME_DEFAULTS);
 
-            byId('theme').value = theme
             setCode(source);
 
             byId('code').addEventListener('keyup', () => renderPreview());
             byId('form').addEventListener('submit', submitGraph);
 
-            mermaid.initialize({
-                startOnLoad: false,
-                theme,
-            });
+            mermaid.initialize(getMermaidRenderConfig(theme));
 
 
 
@@ -544,5 +662,3 @@
 </style>
 </body>
 </html>
-
-
