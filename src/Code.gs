@@ -109,8 +109,8 @@ function openPasteMarkdownDialog() {
 
 function openThemeDialog() {
   var html = HtmlService.createHtmlOutputFromFile('theme_settings')
-    .setWidth(720)
-    .setHeight(620)
+    .setWidth(960)
+    .setHeight(680)
     .append(`<script>
       window.mermaidThemeDataFromGoogle=${jsonForHtml_(getMermaidThemeConfig())}
     </script>`);

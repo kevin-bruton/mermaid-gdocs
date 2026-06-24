@@ -16,8 +16,17 @@
     <label for="themeName">Name</label>
     <input id="themeName" type="text" maxlength="60" autocomplete="off" />
 
-    <label for="themeVariables">Theme variables JSON</label>
-    <textarea id="themeVariables" spellcheck="false"></textarea>
+    <div class="workspace">
+      <div class="variables-panel">
+        <label for="themeVariables">Theme variables JSON</label>
+        <textarea id="themeVariables" spellcheck="false"></textarea>
+      </div>
+
+      <div class="preview-panel">
+        <label for="themePreview">Preview</label>
+        <div id="themePreview"></div>
+      </div>
+    </div>
 
     <div class="buttons">
       <button type="button" id="deleteTheme">Delete</button>
@@ -27,7 +36,9 @@
     </div>
   </form>
 
-  <script>
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+
     const SAMPLE_VARIABLES = {
       primaryColor: '#f6d365',
       primaryTextColor: '#1f2933',
@@ -36,11 +47,22 @@
       secondaryColor: '#dbeafe',
       tertiaryColor: '#f8fafc',
       fontFamily: 'Arial',
+      fontSize: '14px',
     };
+    const PREVIEW_GRAPH = `graph LR
+  A[Start] --> B{Choice}
+  B -->|One| C[Result one]
+  B -->|Two| D[Result two]`;
 
     const byId = id => document.getElementById(id);
     let themeConfig = normalizeThemeConfig(window.mermaidThemeDataFromGoogle);
     let selectedThemeId = '';
+    let previewSequence = 0;
+
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: 'base',
+    });
 
     function normalizeThemeConfig(config) {
       return {
@@ -75,6 +97,14 @@
       byId('deleteTheme').disabled = isBusy || !selectedThemeId;
       byId('saveTheme').disabled = isBusy;
       byId('close').disabled = isBusy;
+    }
+
+    function debounce(fn, wait) {
+      let timeoutId = null;
+      return (...args) => {
+        window.clearTimeout(timeoutId);
+        timeoutId = window.setTimeout(() => fn(...args), wait);
+      };
     }
 
     function refreshThemeList(nextSelectedId = selectedThemeId) {
@@ -112,6 +142,7 @@
 
       byId('deleteTheme').disabled = !selectedThemeId;
       setStatus('');
+      renderPreview();
     }
 
     function parseThemeVariables() {
@@ -133,6 +164,44 @@
 
       return parsed;
     }
+
+    async function renderPreview() {
+      const previewNode = byId('themePreview');
+      const renderId = `theme-settings-preview-${++previewSequence}`;
+      const currentSequence = previewSequence;
+
+      try {
+        const themeVariables = parseThemeVariables();
+        mermaid.initialize({
+          startOnLoad: false,
+          theme: 'base',
+          themeVariables,
+        });
+
+        const { svg } = await mermaid.render(renderId, PREVIEW_GRAPH);
+        if (currentSequence !== previewSequence) {
+          return;
+        }
+
+        previewNode.className = '';
+        previewNode.innerHTML = svg;
+        const svgElement = previewNode.querySelector('svg');
+        if (svgElement) {
+          svgElement.removeAttribute('height');
+          svgElement.style.maxWidth = '100%';
+          svgElement.style.height = 'auto';
+        }
+      } catch (error) {
+        if (currentSequence !== previewSequence) {
+          return;
+        }
+
+        previewNode.className = 'preview-error';
+        previewNode.textContent = error.message || String(error);
+      }
+    }
+
+    const renderPreviewDebounced = debounce(renderPreview, 180);
 
     async function handleSave(event) {
       event.preventDefault();
@@ -182,6 +251,7 @@
       byId('themeName').focus();
     });
     byId('deleteTheme').addEventListener('click', handleDelete);
+    byId('themeVariables').addEventListener('input', renderPreviewDebounced);
     byId('close').addEventListener('click', () => {
       if (window.google?.script?.host) {
         window.google.script.host.close();
@@ -204,8 +274,9 @@
     #form {
       box-sizing: border-box;
       display: grid;
-      grid-template-rows: auto auto auto minmax(0, 1fr) auto;
-      gap: 10px;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+      row-gap: 6px;
+      column-gap: 10px;
       height: 100%;
       padding: 18px;
     }
@@ -235,6 +306,23 @@
       width: 100%;
     }
 
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(260px, 0.72fr) minmax(420px, 1.65fr);
+      gap: 10px;
+      margin-top: -6px;
+      min-height: 0;
+    }
+
+    .variables-panel,
+    .preview-panel {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      gap: 8px;
+      min-width: 0;
+      min-height: 0;
+    }
+
     #themeVariables {
       box-sizing: border-box;
       width: 100%;
@@ -242,6 +330,30 @@
       min-height: 300px;
       resize: none;
       font: 13px/1.5 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    }
+
+    #themePreview {
+      box-sizing: border-box;
+      display: grid;
+      place-items: center;
+      min-height: 300px;
+      overflow: auto;
+      border: 1px solid #dadce0;
+      background: #fff;
+      padding: 16px;
+    }
+
+    #themePreview svg {
+      max-width: 100%;
+      width: 100%;
+      min-width: 420px;
+    }
+
+    #themePreview.preview-error {
+      place-items: start;
+      color: #b3261e;
+      font: 13px/1.45 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+      white-space: pre-wrap;
     }
 
     .buttons {
