@@ -375,6 +375,24 @@
       };
     }
 
+    function normalizeCodeLanguage(language) {
+      const codeLanguage = String(language || '').trim().split(/\s+/)[0].toLowerCase();
+      switch (codeLanguage) {
+        case 'js':
+        case 'javascript':
+        case 'mjs':
+        case 'cjs':
+        case 'jsx':
+          return 'javascript';
+        case 'ts':
+        case 'typescript':
+        case 'tsx':
+          return 'typescript';
+        default:
+          return codeLanguage;
+      }
+    }
+
     function tokenizeMarkdown(markdown) {
       return marked.lexer(markdown || '');
     }
@@ -437,7 +455,7 @@
               blocks.push({
                 type: 'code',
                 text: String(token.text || ''),
-                language: String(token.lang || ''),
+                language: normalizeCodeLanguage(info.language),
                 quoteDepth,
               });
             }

@@ -16,6 +16,26 @@ var MERMAID_BUILT_IN_THEMES = [
   { id: 'neutral', name: 'Neutral', mermaidTheme: 'neutral' },
   { id: 'base', name: 'Base', mermaidTheme: 'base' },
 ];
+var MARKDOWN_CODE_STYLE = {
+  background: '#f1f3f4',
+  borderColor: '#dadce0',
+  borderWidth: 1,
+  text: '#202124',
+  keyword: '#0b57d0',
+  type: '#9334e6',
+  string: '#188038',
+  number: '#b06000',
+  comment: '#5f6368',
+  fontFamily: 'Courier New',
+  fontSize: 11,
+  padding: 6,
+  marginBefore: 6,
+  marginAfter: 6,
+};
+var MARKDOWN_INLINE_CODE_STYLE = {
+  color: '#188038',
+  fontFamily: 'Roboto Mono',
+};
 var MARKDOWN_TABLE_STYLE = {
   borderColor: '#dadce0',
   borderWidth: 1,
@@ -643,27 +663,318 @@ function insertMarkdownListItem_(body, index, block) {
 }
 
 function insertMarkdownCodeBlock_(body, index, block) {
-  var lines = String(block.text || '').split('\n');
-  if (!lines.length) {
-    lines = [''];
+  var code = String(block.text || '');
+  var language = normalizeMarkdownCodeLanguage_(block.language);
+  var quoteDepth = block.quoteDepth || 0;
+
+  insertMarkdownCodeMarginParagraph_(body, index, quoteDepth, 'before');
+  index += 1;
+
+  var table = body.insertTable(index, [[code || ' ']]);
+  var cell = table.getCell(0, 0);
+  var text = cell.editAsText();
+  var textValue = text.getText();
+
+  applyMarkdownCodeBlockTableStyle_(table, cell, quoteDepth);
+
+  if (textValue) {
+    applyMarkdownCodeBaseStyle_(text, textValue.length);
+    applyMarkdownCodeSyntaxStyles_(text, textValue, language);
   }
 
-  lines.forEach(function(line) {
-    var paragraph = body.insertParagraph(index, line);
-    var text = paragraph.editAsText();
-    var lineLength = line.length;
+  index += 1;
+  insertMarkdownCodeMarginParagraph_(body, index, quoteDepth, 'after');
+  return index + 1;
+}
 
-    applyQuoteIndent_(paragraph, (block.quoteDepth || 0) + 1);
+function insertMarkdownCodeMarginParagraph_(body, index, quoteDepth, position) {
+  var paragraph = body.insertParagraph(index, '');
+  applyQuoteIndent_(paragraph, quoteDepth || 0);
 
-    if (lineLength > 0) {
-      text.setFontFamily(0, lineLength - 1, 'Courier New');
-      text.setBackgroundColor(0, lineLength - 1, '#f1f3f4');
+  if (typeof paragraph.setSpacingBefore === 'function') {
+    paragraph.setSpacingBefore(position === 'after' ? MARKDOWN_CODE_STYLE.marginAfter : 0);
+  }
+  if (typeof paragraph.setSpacingAfter === 'function') {
+    paragraph.setSpacingAfter(position === 'before' ? MARKDOWN_CODE_STYLE.marginBefore : 0);
+  }
+  if (typeof paragraph.setLineSpacing === 'function') {
+    paragraph.setLineSpacing(1);
+  }
+
+  return paragraph;
+}
+
+function applyMarkdownCodeBlockTableStyle_(table, cell, quoteDepth) {
+  if (typeof table.setBorderColor === 'function') {
+    table.setBorderColor(MARKDOWN_CODE_STYLE.borderColor);
+  }
+  if (typeof table.setBorderWidth === 'function') {
+    table.setBorderWidth(MARKDOWN_CODE_STYLE.borderWidth);
+  }
+
+  if (typeof cell.setBackgroundColor === 'function') {
+    cell.setBackgroundColor(MARKDOWN_CODE_STYLE.background);
+  }
+  setMarkdownCodeCellPadding_(cell, MARKDOWN_CODE_STYLE.padding);
+
+  for (var childIndex = 0; childIndex < cell.getNumChildren(); childIndex += 1) {
+    var child = cell.getChild(childIndex);
+    if (child.getType && child.getType() === DocumentApp.ElementType.PARAGRAPH) {
+      var paragraph = child.asParagraph();
+      applyMarkdownCodeParagraphStyle_(paragraph);
+      applyQuoteIndent_(paragraph, quoteDepth || 0);
+    }
+  }
+}
+
+function setMarkdownCodeCellPadding_(cell, padding) {
+  [
+    'setPaddingTop',
+    'setPaddingRight',
+    'setPaddingBottom',
+    'setPaddingLeft',
+  ].forEach(function(methodName) {
+    if (typeof cell[methodName] === 'function') {
+      cell[methodName](padding);
+    }
+  });
+}
+
+function applyMarkdownCodeParagraphStyle_(paragraph) {
+  if (typeof paragraph.setSpacingBefore === 'function') {
+    paragraph.setSpacingBefore(0);
+  }
+  if (typeof paragraph.setSpacingAfter === 'function') {
+    paragraph.setSpacingAfter(0);
+  }
+  if (typeof paragraph.setLineSpacing === 'function') {
+    paragraph.setLineSpacing(1);
+  }
+}
+
+function normalizeMarkdownCodeLanguage_(language) {
+  var codeLanguage = String(language || '').trim().split(/\s+/)[0].toLowerCase();
+  switch (codeLanguage) {
+    case 'js':
+    case 'javascript':
+    case 'mjs':
+    case 'cjs':
+    case 'jsx':
+      return 'javascript';
+    case 'ts':
+    case 'typescript':
+    case 'tsx':
+      return 'typescript';
+    default:
+      return codeLanguage;
+  }
+}
+
+function isJavascriptOrTypescriptLanguage_(language) {
+  return language === 'javascript' || language === 'typescript';
+}
+
+function applyMarkdownCodeBaseStyle_(text, textLength) {
+  var end = textLength - 1;
+  text.setFontFamily(0, end, MARKDOWN_CODE_STYLE.fontFamily);
+  text.setForegroundColor(0, end, MARKDOWN_CODE_STYLE.text);
+  text.setFontSize(0, end, MARKDOWN_CODE_STYLE.fontSize);
+}
+
+function applyMarkdownCodeSyntaxStyles_(text, code, language) {
+  if (!isJavascriptOrTypescriptLanguage_(language)) {
+    return;
+  }
+
+  var syntaxState = {};
+  var offset = 0;
+  String(code || '').split('\n').forEach(function(line) {
+    if (line.length > 0) {
+      applyJavascriptTypescriptSyntaxStyle_(text, line, language, syntaxState, offset);
+    } else if (syntaxState.inBlockComment || syntaxState.inTemplateString) {
+      applyJavascriptTypescriptSyntaxStyle_(text, line, language, syntaxState, offset);
+    }
+    offset += line.length + 1;
+  });
+}
+
+function applyJavascriptTypescriptSyntaxStyle_(text, line, language, syntaxState, baseOffset) {
+  baseOffset = Number(baseOffset) || 0;
+  var occupiedRanges = [];
+  var index = 0;
+
+  while (index < line.length) {
+    if (syntaxState.inBlockComment) {
+      var blockCommentEnd = line.indexOf('*/', index);
+      var blockEnd = blockCommentEnd === -1 ? line.length - 1 : blockCommentEnd + 1;
+      applyMarkdownCodeRangeStyle_(text, baseOffset + index, baseOffset + blockEnd, {
+        color: MARKDOWN_CODE_STYLE.comment,
+        italic: true,
+      });
+      addOccupiedRange_(occupiedRanges, index, blockEnd);
+
+      if (blockCommentEnd === -1) {
+        return;
+      }
+
+      syntaxState.inBlockComment = false;
+      index = blockEnd + 1;
+      continue;
+    }
+
+    if (syntaxState.inTemplateString) {
+      var templateEnd = findJsTsStringEnd_(line, index - 1, '`');
+      var templateRangeEnd = templateEnd === -1 ? line.length - 1 : templateEnd;
+      applyMarkdownCodeRangeStyle_(text, baseOffset + index, baseOffset + templateRangeEnd, {
+        color: MARKDOWN_CODE_STYLE.string,
+      });
+      addOccupiedRange_(occupiedRanges, index, templateRangeEnd);
+
+      if (templateEnd === -1) {
+        return;
+      }
+
+      syntaxState.inTemplateString = false;
+      index = templateRangeEnd + 1;
+      continue;
+    }
+
+    var current = line.charAt(index);
+    var next = line.charAt(index + 1);
+
+    if (current === '/' && next === '/') {
+      applyMarkdownCodeRangeStyle_(text, baseOffset + index, baseOffset + line.length - 1, {
+        color: MARKDOWN_CODE_STYLE.comment,
+        italic: true,
+      });
+      addOccupiedRange_(occupiedRanges, index, line.length - 1);
+      break;
+    }
+
+    if (current === '/' && next === '*') {
+      var commentEnd = line.indexOf('*/', index + 2);
+      var commentRangeEnd = commentEnd === -1 ? line.length - 1 : commentEnd + 1;
+      applyMarkdownCodeRangeStyle_(text, baseOffset + index, baseOffset + commentRangeEnd, {
+        color: MARKDOWN_CODE_STYLE.comment,
+        italic: true,
+      });
+      addOccupiedRange_(occupiedRanges, index, commentRangeEnd);
+      syntaxState.inBlockComment = commentEnd === -1;
+      index = commentRangeEnd + 1;
+      continue;
+    }
+
+    if (current === '"' || current === "'" || current === '`') {
+      var stringEnd = findJsTsStringEnd_(line, index, current);
+      var stringRangeEnd = stringEnd === -1 ? line.length - 1 : stringEnd;
+      applyMarkdownCodeRangeStyle_(text, baseOffset + index, baseOffset + stringRangeEnd, {
+        color: MARKDOWN_CODE_STYLE.string,
+      });
+      addOccupiedRange_(occupiedRanges, index, stringRangeEnd);
+      syntaxState.inTemplateString = current === '`' && stringEnd === -1;
+      index = stringRangeEnd + 1;
+      continue;
     }
 
     index += 1;
-  });
+  }
 
-  return index;
+  applyRegexStyleToUnoccupiedRanges_(
+    text,
+    line,
+    /\b(?:0x[0-9a-f]+|0b[01]+|0o[0-7]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/gi,
+    { color: MARKDOWN_CODE_STYLE.number },
+    occupiedRanges,
+    baseOffset
+  );
+  applyRegexStyleToUnoccupiedRanges_(
+    text,
+    line,
+    getJsTsKeywordRegex_(),
+    { color: MARKDOWN_CODE_STYLE.keyword, bold: true },
+    occupiedRanges,
+    baseOffset
+  );
+
+  if (language === 'typescript') {
+    applyRegexStyleToUnoccupiedRanges_(
+      text,
+      line,
+      getTypescriptTypeKeywordRegex_(),
+      { color: MARKDOWN_CODE_STYLE.type, bold: true },
+      occupiedRanges,
+      baseOffset
+    );
+  }
+}
+
+function findJsTsStringEnd_(line, startIndex, quote) {
+  for (var index = startIndex + 1; index < line.length; index += 1) {
+    if (line.charAt(index) === '\\') {
+      index += 1;
+      continue;
+    }
+    if (line.charAt(index) === quote) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function getJsTsKeywordRegex_() {
+  return /\b(?:async|await|break|case|catch|class|const|continue|debugger|default|delete|do|else|export|extends|false|finally|for|from|function|if|import|in|instanceof|let|new|null|of|return|static|super|switch|this|throw|true|try|typeof|undefined|var|void|while|with|yield)\b/g;
+}
+
+function getTypescriptTypeKeywordRegex_() {
+  return /\b(?:abstract|any|as|bigint|boolean|declare|enum|implements|infer|interface|is|keyof|module|namespace|never|number|object|private|protected|public|readonly|satisfies|string|symbol|type|unknown)\b/g;
+}
+
+function applyRegexStyleToUnoccupiedRanges_(text, line, regex, style, occupiedRanges, baseOffset) {
+  var match;
+  baseOffset = Number(baseOffset) || 0;
+  regex.lastIndex = 0;
+
+  while ((match = regex.exec(line)) !== null) {
+    var start = match.index;
+    var end = start + match[0].length - 1;
+    if (isRangeUnoccupied_(occupiedRanges, start, end)) {
+      applyMarkdownCodeRangeStyle_(text, baseOffset + start, baseOffset + end, style);
+      addOccupiedRange_(occupiedRanges, start, end);
+    }
+  }
+}
+
+function isRangeUnoccupied_(occupiedRanges, start, end) {
+  return !(occupiedRanges || []).some(function(range) {
+    return start <= range.end && end >= range.start;
+  });
+}
+
+function addOccupiedRange_(occupiedRanges, start, end) {
+  if (start > end) {
+    return;
+  }
+  occupiedRanges.push({
+    start: start,
+    end: end,
+  });
+}
+
+function applyMarkdownCodeRangeStyle_(text, start, end, style) {
+  if (start > end) {
+    return;
+  }
+
+  if (style.color) {
+    text.setForegroundColor(start, end, style.color);
+  }
+  if (style.bold) {
+    text.setBold(start, end, true);
+  }
+  if (style.italic) {
+    text.setItalic(start, end, true);
+  }
 }
 
 function insertMarkdownMermaidBlock_(body, index, block) {
@@ -1023,8 +1334,8 @@ function applyInlineStyles_(textElement, inlines) {
       textElement.setLinkUrl(start, end, inline.linkUrl);
     }
     if (inline.code) {
-      textElement.setFontFamily(start, end, 'Courier New');
-      textElement.setBackgroundColor(start, end, '#f1f3f4');
+      textElement.setFontFamily(start, end, MARKDOWN_INLINE_CODE_STYLE.fontFamily);
+      textElement.setForegroundColor(start, end, MARKDOWN_INLINE_CODE_STYLE.color);
     }
     if (inline.superscript) {
       textElement.setTextAlignment(start, end, DocumentApp.TextAlignment.SUPERSCRIPT);
