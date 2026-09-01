@@ -1234,11 +1234,33 @@ function widenMarkdownTable_(table, columnCount) {
     return;
   }
 
+  // Measure character count for each column to determine proportional widths
+  var columnCharCounts = new Array(columnCount).fill(0);
+  var rowCount = table.getNumRows();
+
+  for (var rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+    for (var colIndex = 0; colIndex < columnCount; colIndex += 1) {
+      var cell = table.getCell(rowIndex, colIndex);
+      var cellText = cell.getText().length;
+      columnCharCounts[colIndex] = Math.max(columnCharCounts[colIndex], cellText);
+    }
+  }
+
+  // Calculate total characters to distribute width proportionally
+  var totalCharCount = columnCharCounts.reduce(function(sum, count) { return sum + count; }, 0);
+  if (totalCharCount === 0) {
+    totalCharCount = columnCount; // Fallback: equal distribution if all cells empty
+  }
+
+  // Standard Google Docs page width (in points) minus margins
+  var pageWidth = 468; // 612 points (letter width) - 72 points (margins)
+  var baseWidth = pageWidth * MARKDOWN_TABLE_STYLE.widthMultiplier;
+  var minColumnWidth = 75; // Minimum width in points to avoid extremely narrow columns
+
   for (var columnIndex = 0; columnIndex < columnCount; columnIndex += 1) {
-    table.setColumnWidth(
-      columnIndex,
-      table.getColumnWidth(columnIndex) * MARKDOWN_TABLE_STYLE.widthMultiplier
-    );
+    var proportion = columnCharCounts[columnIndex] / totalCharCount;
+    var columnWidth = Math.max(minColumnWidth, baseWidth * proportion);
+    table.setColumnWidth(columnIndex, columnWidth);
   }
 }
 
