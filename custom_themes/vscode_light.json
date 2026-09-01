@@ -1,10 +1,11 @@
 {
-  "fontSize": "12px",
   "primaryColor": "#F5FAFF",
-  "lineColor": "#6F8FC7",
-  "fontFamily": "Arial",
-  "tertiaryColor": "gainsboro",
+  "fontSize": "12px",
   "primaryTextColor": "#1f2933",
   "secondaryColor": "#dbeafe",
-  "primaryBorderColor": "#6F8FC7"
+  "lineColor": "#6F8FC7",
+  "tertiaryColor": "gainsboro",
+  "tertiaryBorderColor": "black",
+  "primaryBorderColor": "#6F8FC7",
+  "fontFamily": "Arial"
 }
