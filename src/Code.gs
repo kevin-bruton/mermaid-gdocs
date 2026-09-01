@@ -1,4 +1,119 @@
 /**
+SETUP INSTRUCTIONS FOR CONSUMING PROJECTS
+
+When using this as a library, the consuming project must include ALL of these wrapper functions
+to enable the menu items and HTML dialogs to work. Add the following to your consuming project's script:
+
+// Get reference to the mermaid-gdocs library
+var MermaidManager = ...;  // Replace ... with your library identifier
+
+// Menu callbacks (referenced by string name in createMenu()):
+
+function onOpen() { MermaidManager.createMenu(); }
+function addNewChart() { MermaidManager.addNewChart(); }
+function editSelectedChart() { MermaidManager.editSelectedChart(); }
+function openPasteMarkdownDialog() { MermaidManager.openPasteMarkdownDialog(); }
+function openThemeDialog() { MermaidManager.openThemeDialog(); }
+function insertImage(source, theme, base64, width, height) { return MermaidManager.insertImage(source, theme, base64, width, height); }
+function insertMarkdownBlocks(blocks) { return MermaidManager.insertMarkdownBlocks(blocks); }
+function setImageFrameConfig(config) { return MermaidManager.setImageFrameConfig(config); }
+function getImageFrameConfig() { return MermaidManager.getImageFrameConfig(); }
+function getMermaidThemeConfig() { return MermaidManager.getMermaidThemeConfig(); }
+function saveMermaidCustomTheme(theme) { return MermaidManager.saveMermaidCustomTheme(theme); }
+function deleteMermaidCustomTheme(id) { return MermaidManager.deleteMermaidCustomTheme(id); }
+
+These wrappers are necessary because google.script.run can only access functions
+defined in the consuming project's own script, not library functions directly.
+ */
+
+function onOpen() {
+  createMenu();
+}
+
+/**
+ * @public
+**/
+function createMenu() {
+  DocumentApp.getUi()
+    .createMenu('Mermaid')
+    .addItem('New chart', 'addNewChart')
+    .addItem('Edit selected chart', 'editSelectedChart')
+    .addItem('Paste from markdown', 'openPasteMarkdownDialog')
+    .addItem('Manage themes', 'openThemeDialog')
+    .addToUi();
+}
+
+/**
+ * @public
+**/
+function addNewChart(){
+  var selected=findSelectedImage()
+  if(selected){
+    DocumentApp.getUi().alert('You have a chart selected, please unselect it first, or click "edit" to edit it.');
+  }else{
+    openDialog("graph LR\n  A -->B", 'Insert',"")
+  }
+}
+
+/**
+ * @public
+**/
+function editSelectedChart(){
+  var selected=findSelectedImage()
+  if(!selected){
+    DocumentApp.getUi().alert('Please select an existing chart created with this app first. Make sure the graph image placement is "in line" or it will not work.');
+  }else{
+    let source=selected.getAltDescription();
+    let theme= selected.getAltTitle().replace('mermaid-graph/','') || ""
+
+    try{
+      // backward compat
+      const decoded=JSON.parse(source);
+      if(decoded.source){
+        source=decoded.source
+      }
+      if(decoded.theme){
+        theme=decoded.theme
+      }
+    }catch(e){
+    }
+
+    openDialog(source, 'Update', theme, selected.getWidth())
+  }
+}
+
+/**
+ * @public
+**/
+function openPasteMarkdownDialog() {
+  var imageLayout = getDocumentImageLayoutConfig();
+  var html = HtmlService.createHtmlOutputFromFile('paste_markdown')
+    .setWidth(960)
+    .setHeight(720)
+    .append(`<script>
+      window.mermaidImageLayoutFromGoogle=${jsonForHtml_(imageLayout)}
+      window.mermaidThemeDataFromGoogle=${jsonForHtml_(getMermaidThemeConfig())}
+    </script>`);
+
+  DocumentApp.getUi()
+    .showModalDialog(html, 'Paste from markdown');
+}
+/**
+ * @public
+**/
+function openThemeDialog() {
+  var html = HtmlService.createHtmlOutputFromFile('theme_settings')
+    .setWidth(960)
+    .setHeight(680)
+    .append(`<script>
+      window.mermaidThemeDataFromGoogle=${jsonForHtml_(getMermaidThemeConfig())}
+    </script>`);
+
+  DocumentApp.getUi()
+    .showModalDialog(html, 'Mermaid themes');
+}
+
+/**
  * @OnlyCurrentDoc
  */ 
 var MERMAID_IMAGE_MAX_WIDTH_RATIO = 1;
@@ -39,6 +154,7 @@ var MARKDOWN_INLINE_CODE_STYLE = {
 var MARKDOWN_TABLE_STYLE = {
   borderColor: '#dadce0',
   borderWidth: 1,
+  widthMultiplier: 1.5,
   headerBackground: '#e8eaed',
   headerTextColor: '#202124',
   bodyTextColor: '#3c4043',
@@ -47,55 +163,6 @@ var MARKDOWN_TABLE_STYLE = {
   lineSpacing: 1.15,
   paragraphSpacing: 2,
 };
-
-function onInstall() {
-  onOpen(); 
-}
-
-function onOpen() {
-  DocumentApp.getUi()
-    .createMenu('Mermaid')
-    .addItem('New chart', 'addNewChart')
-    .addItem('Edit selected chart', 'editSelectedChart')
-    .addItem('Paste from markdown', 'openPasteMarkdownDialog')
-    .addItem('Manage themes', 'openThemeDialog')
-    .addToUi();
-}
-
- 
-function addNewChart(){
-  var selected=findSelectedImage()
-  if(selected){
-    DocumentApp.getUi().alert('You have a chart selected, please unselect it first, or click "edit" to edit it.');
-  }else{
-    openDialog("graph LR\n  A -->B", 'Insert',"")
-  }
-}
-  
-
-function editSelectedChart(){
-  var selected=findSelectedImage()
-  if(!selected){
-    DocumentApp.getUi().alert('Please select an existing chart created with this app first. Make sure the graph image placement is "in line" or it will not work.');
-  }else{
-    let source=selected.getAltDescription();
-    let theme= selected.getAltTitle().replace('mermaid-graph/','') || ""
-
-    try{
-      // backward compat
-      const decoded=JSON.parse(source);
-      if(decoded.source){
-        source=decoded.source
-      }
-      if(decoded.theme){
-        theme=decoded.theme
-      }
-    }catch(e){
-    }
-
-    openDialog(source, 'Update', theme, selected.getWidth())
-  }
-}
 
 function openDialog(source,label,theme, currentWidth=0) {
   var imageLayout = getDocumentImageLayoutConfig();
@@ -113,36 +180,12 @@ function openDialog(source,label,theme, currentWidth=0) {
       .showModalDialog(html, 'Graph editor')
 }
 
-function openPasteMarkdownDialog() {
-  var imageLayout = getDocumentImageLayoutConfig();
-  var html = HtmlService.createHtmlOutputFromFile('paste_markdown')
-    .setWidth(960)
-    .setHeight(720)
-    .append(`<script>
-      window.mermaidImageLayoutFromGoogle=${jsonForHtml_(imageLayout)}
-      window.mermaidThemeDataFromGoogle=${jsonForHtml_(getMermaidThemeConfig())}
-    </script>`);
-
-  DocumentApp.getUi()
-    .showModalDialog(html, 'Paste from markdown');
-}
-
-function openThemeDialog() {
-  var html = HtmlService.createHtmlOutputFromFile('theme_settings')
-    .setWidth(960)
-    .setHeight(680)
-    .append(`<script>
-      window.mermaidThemeDataFromGoogle=${jsonForHtml_(getMermaidThemeConfig())}
-    </script>`);
-
-  DocumentApp.getUi()
-    .showModalDialog(html, 'Mermaid themes');
-}
-
 function jsonForHtml_(value) {
   return JSON.stringify(value).replace(/</g, '\\u003c');
 }
-
+/**
+ * @public
+ **/
 function getMermaidThemeConfig() {
   var customThemes = getMermaidCustomThemes_();
   return {
@@ -174,6 +217,9 @@ function getMermaidThemeConfig() {
   };
 }
 
+/**
+ * @public
+ **/
 function saveMermaidCustomTheme(theme) {
   var existingThemes = getMermaidCustomThemes_();
   var name = sanitizeMermaidThemeName_(theme && theme.name);
@@ -209,6 +255,9 @@ function saveMermaidCustomTheme(theme) {
   };
 }
 
+/**
+ * @public
+ **/
 function deleteMermaidCustomTheme(id) {
   var themeId = sanitizeMermaidCustomThemeId_(id);
   if (!themeId) {
@@ -407,6 +456,9 @@ function getDocumentContentWidth_() {
   return DEFAULT_DOCUMENT_CONTENT_WIDTH;
 }
 
+/**
+ * @public
+ **/
 function getImageFrameConfig() {
   var defaults = {
     borderWidth: 1,
@@ -433,6 +485,9 @@ function getImageFrameConfig() {
   }
 }
 
+/**
+ * @public
+ **/
 function setImageFrameConfig(config) {
   var sanitized = sanitizeImageFrameConfig_(config || {});
   var userProps = PropertiesService.getUserProperties();
@@ -485,6 +540,9 @@ function findSelectedImage(){
 
 }
 
+/**
+ * @public
+ **/
 function insertImage(source, theme, base64,width, height){
   var blob=Utilities.newBlob(Utilities.base64Decode(base64.split(',')[1]), 'image/png', "mermaid-chart.png");
   var selected=findSelectedImage();
@@ -517,6 +575,9 @@ function insertImage(source, theme, base64,width, height){
 
 }
 
+/**
+ * @public
+ **/
 function insertMarkdownBlocks(blocks) {
   if (!blocks || !blocks.length) {
     throw new Error('No markdown content to insert.');
@@ -1151,6 +1212,7 @@ function insertMarkdownTable_(body, index, block) {
   });
 
   var table = body.insertTable(index, tableText);
+  widenMarkdownTable_(table, maxColumns);
   applyMarkdownTableStyle_(table, rows.length, maxColumns);
 
   for (var rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
@@ -1165,6 +1227,19 @@ function insertMarkdownTable_(body, index, block) {
   }
 
   return index + 1;
+}
+
+function widenMarkdownTable_(table, columnCount) {
+  if (!table || typeof table.getColumnWidth !== 'function' || typeof table.setColumnWidth !== 'function') {
+    return;
+  }
+
+  for (var columnIndex = 0; columnIndex < columnCount; columnIndex += 1) {
+    table.setColumnWidth(
+      columnIndex,
+      table.getColumnWidth(columnIndex) * MARKDOWN_TABLE_STYLE.widthMultiplier
+    );
+  }
 }
 
 function normalizeMarkdownTableCells_(cells) {

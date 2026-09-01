@@ -49,10 +49,15 @@
       fontFamily: 'Arial',
       fontSize: '14px',
     };
-    const PREVIEW_GRAPH = `graph LR
-  A[Start] --> B{Choice}
-  B -->|One| C[Result one]
-  B -->|Two| D[Result two]`;
+    const PREVIEW_GRAPH = `graph TD
+  A["<b>Primary</b><br/>Node"] --> B{Decision}
+  B -->|Path 1| C["Secondary<br/>Node"]
+  B -->|Path 2| D[("Tertiary<br/>Node")]
+  C -.->|Dotted| Theme
+  D --> Theme
+  subgraph Theme["Color Showcase"]
+    G["Node 1"]
+  end`;
 
     const byId = id => document.getElementById(id);
     let themeConfig = normalizeThemeConfig(window.mermaidThemeDataFromGoogle);
@@ -184,13 +189,113 @@
         }
 
         previewNode.className = '';
-        previewNode.innerHTML = svg;
-        const svgElement = previewNode.querySelector('svg');
+        
+        // Create a container for the graph and color guide
+        const container = document.createElement('div');
+        container.style.width = '100%';
+        container.style.height = '100%';
+        container.style.display = 'flex';
+        container.style.flexDirection = 'column';
+        container.style.gap = '12px';
+        container.style.overflow = 'hidden';
+        
+        // Graph container with size constraint
+        const graphContainer = document.createElement('div');
+        graphContainer.style.minWidth = '0';
+        graphContainer.style.minHeight = '0';
+        graphContainer.style.flex = '1';
+        graphContainer.style.display = 'flex';
+        graphContainer.style.justifyContent = 'center';
+        graphContainer.style.alignItems = 'center';
+        graphContainer.style.overflow = 'hidden';
+        graphContainer.innerHTML = svg;
+        container.appendChild(graphContainer);
+        
+        const svgElement = graphContainer.querySelector('svg');
         if (svgElement) {
           svgElement.removeAttribute('height');
+          svgElement.removeAttribute('width');
           svgElement.style.maxWidth = '100%';
+          svgElement.style.maxHeight = '100%';
           svgElement.style.height = 'auto';
+          svgElement.style.width = 'auto';
         }
+        
+        // Color guide
+        const colorGuide = document.createElement('div');
+        colorGuide.style.borderTop = '1px solid #dadce0';
+        colorGuide.style.paddingTop = '8px';
+        colorGuide.style.fontSize = '12px';
+        
+        const colorInfo = [];
+        if (themeVariables.primaryColor) colorInfo.push(['Primary', themeVariables.primaryColor]);
+        if (themeVariables.secondaryColor) colorInfo.push(['Secondary', themeVariables.secondaryColor]);
+        if (themeVariables.tertiaryColor) colorInfo.push(['Tertiary', themeVariables.tertiaryColor]);
+        if (themeVariables.primaryBorderColor) colorInfo.push(['Border', themeVariables.primaryBorderColor]);
+        if (themeVariables.lineColor) colorInfo.push(['Line', themeVariables.lineColor]);
+        if (themeVariables.primaryTextColor) colorInfo.push(['Text', themeVariables.primaryTextColor]);
+        if (themeVariables.fontFamily) colorInfo.push(['Font', themeVariables.fontFamily]);
+        if (themeVariables.fontSize) colorInfo.push(['Size', themeVariables.fontSize]);
+        
+        const swatchGrid = document.createElement('div');
+        swatchGrid.style.display = 'grid';
+        swatchGrid.style.gridTemplateColumns = 'repeat(auto-fit, minmax(140px, 1fr))';
+        swatchGrid.style.gap = '8px';
+        
+        colorInfo.forEach(([label, value]) => {
+          const swatch = document.createElement('div');
+          swatch.style.display = 'flex';
+          swatch.style.alignItems = 'center';
+          swatch.style.gap = '6px';
+          
+          if (label === 'Font' || label === 'Size') {
+            const textBox = document.createElement('div');
+            textBox.style.width = '24px';
+            textBox.style.height = '24px';
+            textBox.style.border = '1px solid #dadce0';
+            textBox.style.display = 'flex';
+            textBox.align = 'center';
+            textBox.style.justifyContent = 'center';
+            textBox.style.fontSize = '10px';
+            textBox.style.fontWeight = 'bold';
+            textBox.textContent = 'A';
+            if (label === 'Font') textBox.style.fontFamily = value;
+            swatch.appendChild(textBox);
+          } else {
+            const colorBox = document.createElement('div');
+            colorBox.style.width = '24px';
+            colorBox.style.height = '24px';
+            colorBox.style.backgroundColor = value;
+            colorBox.style.border = '1px solid #dadce0';
+            colorBox.style.borderRadius = '2px';
+            swatch.appendChild(colorBox);
+          }
+          
+          const info = document.createElement('div');
+          info.style.flex = '1';
+          info.style.minWidth = '0';
+          const labelElem = document.createElement('div');
+          labelElem.style.fontWeight = '600';
+          labelElem.style.fontSize = '12px';
+          labelElem.textContent = label;
+          const valueElem = document.createElement('div');
+          valueElem.style.fontSize = '11px';
+          valueElem.style.color = '#5f6368';
+          valueElem.style.wordBreak = 'break-all';
+          valueElem.style.overflow = 'hidden';
+          valueElem.textContent = value;
+          info.appendChild(labelElem);
+          info.appendChild(valueElem);
+          swatch.appendChild(info);
+          
+          swatchGrid.appendChild(swatch);
+        });
+        
+        colorGuide.appendChild(swatchGrid);
+        container.appendChild(colorGuide);
+        
+        previewNode.innerHTML = '';
+        previewNode.appendChild(container);
       } catch (error) {
         if (currentSequence !== previewSequence) {
           return;
@@ -334,10 +439,11 @@
 
     #themePreview {
       box-sizing: border-box;
-      display: grid;
-      place-items: center;
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
       min-height: 300px;
-      overflow: auto;
+      overflow: hidden;
       border: 1px solid #dadce0;
       background: #fff;
       padding: 16px;
@@ -345,8 +451,9 @@
 
     #themePreview svg {
       max-width: 100%;
-      width: 100%;
-      min-width: 420px;
+      max-height: 100%;
+      width: auto;
+      height: auto;
     }
 
     #themePreview.preview-error {
