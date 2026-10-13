@@ -306,8 +306,11 @@
     }
 
     function inlineSegmentsFromMarkdown(markdown) {
-      const html = marked.parseInline(markdown || '');
-      const documentFragment = new DOMParser().parseFromString(`<div id="root">${html}</div>`, 'text/html');
+      return inlineSegmentsFromHtml(marked.parseInline(markdown || ''));
+    }
+
+    function inlineSegmentsFromHtml(html) {
+      const documentFragment = new DOMParser().parseFromString(`<div id="root">${html || ''}</div>`, 'text/html');
       const root = documentFragment.getElementById('root');
       const segments = [];
 
@@ -563,8 +566,15 @@
         return [];
       }
 
+      // Table cells arrive as already-lexed inline tokens (strong, em, codespan, link...).
+      // Flattening them through token.text would drop the formatting markers, so render
+      // the tokens back to HTML and walk that instead.
       if (Array.isArray(cell.tokens) && cell.tokens.length) {
-        return mergeAdjacentSegments(cell.tokens.flatMap(token => inlineSegmentsFromToken(token)));
+        try {
+          return inlineSegmentsFromHtml(marked.Parser.parseInline(cell.tokens));
+        } catch (error) {
+          // Fall through to the raw cell text below.
+        }
       }
 
       return inlineSegmentsFromMarkdown(cell.text || '');
