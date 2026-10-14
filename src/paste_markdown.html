@@ -404,7 +404,59 @@
       const tokens = tokenizeMarkdown(markdown);
       const blocks = [];
       appendBlocksFromTokens(tokens, blocks, 0, 0);
+      assignHeadingAnchors(blocks);
       return blocks;
+    }
+
+    // Headings may carry an explicit anchor id, e.g. "## Setup {#install}".
+    // Returns the heading text without the suffix plus the id (or '').
+    function splitHeadingAnchor(text) {
+      const match = /\s*\{#([^\s{}]+)\}\s*$/.exec(text || '');
+      if (!match) {
+        return { text: text || '', anchorId: '' };
+      }
+      return {
+        text: (text || '').slice(0, match.index),
+        anchorId: match[1],
+      };
+    }
+
+    // GitHub-style slug: lower-case, drop punctuation, spaces become hyphens.
+    function slugifyHeadingText(text) {
+      return String(text || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s\-_]/gu, '')
+        .replace(/\s+/g, '-');
+    }
+
+    // Gives every heading block an anchorId: the explicit {#id} when present,
+    // otherwise a slug of its text. Duplicates get -1, -2, ... like GitHub does.
+    // Links of the form [text](#anchor) are resolved to these ids on the server.
+    function assignHeadingAnchors(blocks) {
+      const used = new Set();
+      blocks.forEach(block => {
+        if (block.type !== 'heading') {
+          return;
+        }
+
+        const plainText = (block.inlines || []).map(inline => inline.text || '').join('');
+        const base = block.explicitAnchorId || slugifyHeadingText(plainText);
+        delete block.explicitAnchorId;
+        if (!base) {
+          return;
+        }
+
+        let candidate = base;
+        let suffix = 1;
+        while (used.has(candidate.toLowerCase())) {
+          candidate = `${base}-${suffix}`;
+          suffix += 1;
+        }
+
+        used.add(candidate.toLowerCase());
+        block.anchorId = candidate;
+      });
     }
 
     function blankParagraphCountFromSpaceToken(token) {
@@ -437,14 +489,17 @@
               quoteDepth,
             });
             break;
-          case 'heading':
+          case 'heading': {
+            const heading = splitHeadingAnchor(token.text || '');
             blocks.push({
               type: 'heading',
               level: token.depth || 1,
-              inlines: inlineSegmentsFromToken(token),
+              inlines: inlineSegmentsFromMarkdown(heading.text),
+              explicitAnchorId: heading.anchorId,
               quoteDepth,
             });
             break;
+          }
           case 'code': {
             const info = normalizeTheme(token.lang);
             if (info.language === 'mermaid') {

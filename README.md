@@ -108,3 +108,10 @@ An excellent example from canonical
         W --> X["Video Issue Owner Marks as 'Marketing Ready' & Tags Marketing Team"];
     
         X -->|Published| Y["Issue Owner Marks as 'Done'"];
+
+# Links to other parts of the same document
+
+- **Markdown side** (paste_markdown.html). Every heading gets and anchor id. You can set it explicitly with a suffix, for example `## Setup {#install}`, and the suffix is stripped from the heading text. Without a suffix the id is a GitHub-style slug of the heading text, so `## Hello, World!` becomes `hello-world`. Duplicate ids get `-1`, `-2`, and so on appended to make them unique. Links are written as normal Markdown anchors, for example `[Setup](#install)`.
+- **Server side (Code.gs)** `insertMarkdownBlocks` now runs in two passes. While inserting, headings are recorded by anchor id and any #anchor link is queued instead of applied. After all blocks exist, each queued link gets a bookmark created at the start of its target heading and the link URL set to #bookmark=id.<id>. Forward and backward references both work, including links inside table cells and list items.
+- **Bookmarks are created lazily**, only for headings that a link actually targets, because Docs shows a visible marker for every bookmark.
+- **Links whose target was not pasted** in the same batch stay as plain text rather than becoming dead links. Headings already in the document are not resolved. That is a possible follow-up.

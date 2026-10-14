@@ -109,6 +109,8 @@ When replacing a selected image the server either swaps the inline image in plac
 
 Markdown mermaid fences accept a theme after the language, for example ```` ```mermaid forest ````. The "Theme" select in the paste dialog can override all fences.
 
+Heading blocks carry an `anchorId`: an explicit `{#my-id}` suffix on the heading line, otherwise a GitHub-style slug of the heading text (duplicates get `-1`, `-2`, ...). Links of the form `[text](#my-id)` are not applied immediately; the server records each inserted heading (`registerHeadingAnchor_`) and, after all blocks exist, resolves the pending links to `#bookmark=id.<id>` URLs (`resolvePendingAnchorLinks_`), so forward references work. Bookmarks are created lazily, only for headings that a link actually targets, because Docs shows a visible marker for every bookmark. Docs heading IDs are not reachable from `DocumentApp`, which is why bookmarks are used. Links whose anchor was not pasted in the same batch stay as plain text.
+
 Code blocks become single-cell tables styled by `MARKDOWN_CODE_STYLE`, with a basic JavaScript/TypeScript syntax highlighter. Tables are styled by `MARKDOWN_TABLE_STYLE` and column widths are set proportionally to content length. These style objects at the top of `Code.gs` are the place to tune appearance.
 
 ### Themes

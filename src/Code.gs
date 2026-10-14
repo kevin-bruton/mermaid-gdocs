@@ -8,8 +8,8 @@ to enable the menu items and HTML dialogs to work. Add the following to your con
 var MermaidManager = ...;  // Replace ... with your library identifier
 
 // Menu callbacks (referenced by string name in createMenu()):
-
-function onOpen() { MermaidManager.createMenu(); }
+function addMenu() { MermaidManager.createMenu(); }
+//function onOpen() { MermaidManager.createMenu(); }
 function addNewChart() { MermaidManager.addNewChart(); }
 function editSelectedChart() { MermaidManager.editSelectedChart(); }
 function openPasteMarkdownDialog() { MermaidManager.openPasteMarkdownDialog(); }
@@ -588,8 +588,18 @@ function insertMarkdownBlocks(blocks) {
   var index = getMarkdownInsertionIndex_(document, body);
   var insertedCount = 0;
 
+  // Heading anchors and the in-document links that point at them. Links are
+  // applied after all blocks exist so forward references resolve too.
+  var context = {
+    document: document,
+    documentTab: getActiveDocumentTab_(document),
+    headings: {},
+    anchors: {},
+    pendingLinks: [],
+  };
+
   blocks.forEach(function(block) {
-    var nextIndex = insertMarkdownBlock_(body, index, block || {});
+    var nextIndex = insertMarkdownBlock_(body, index, block || {}, context);
     if (nextIndex > index) {
       insertedCount += (nextIndex - index);
     }
@@ -600,21 +610,115 @@ function insertMarkdownBlocks(blocks) {
     throw new Error('The markdown parsed successfully, but no supported content could be inserted.');
   }
 
+  resolvePendingAnchorLinks_(context);
+
   return insertedCount;
 }
 
-function getActiveBody_(document) {
+function getActiveDocumentTab_(document) {
   if (document.getActiveTab) {
     var activeTab = document.getActiveTab();
     if (activeTab && activeTab.asDocumentTab) {
       var documentTab = activeTab.asDocumentTab();
       if (documentTab && documentTab.getBody) {
-        return documentTab.getBody();
+        return documentTab;
       }
     }
   }
 
+  return null;
+}
+
+function getActiveBody_(document) {
+  var documentTab = getActiveDocumentTab_(document);
+  if (documentTab) {
+    return documentTab.getBody();
+  }
+
   return document.getBody();
+}
+
+// Markdown anchors are compared case-insensitively and may arrive percent-encoded
+// from the link href (marked encodes URLs).
+function normalizeAnchorId_(value) {
+  var anchorId = String(value || '').trim();
+  if (anchorId.charAt(0) === '#') {
+    anchorId = anchorId.slice(1);
+  }
+  try {
+    anchorId = decodeURIComponent(anchorId);
+  } catch (e) {
+    // Keep the raw value when it is not valid percent-encoding.
+  }
+  return anchorId.toLowerCase();
+}
+
+// Records a freshly inserted heading under its anchor id so [text](#anchor)
+// links can point at it. The bookmark itself is only created when a link
+// actually targets the heading, because Docs shows a marker for every bookmark.
+function registerHeadingAnchor_(context, paragraph, anchorId) {
+  var key = normalizeAnchorId_(anchorId);
+  if (!context || !key || context.headings[key]) {
+    return;
+  }
+  context.headings[key] = paragraph;
+}
+
+// Returns the "#bookmark=id.xxxx" URL for a heading anchor, creating the
+// bookmark on first use. Returns '' when the anchor is unknown or bookmarking fails.
+function getAnchorBookmarkUrl_(context, anchorId) {
+  if (context.anchors[anchorId]) {
+    return context.anchors[anchorId];
+  }
+
+  var paragraph = context.headings[anchorId];
+  if (!paragraph) {
+    return '';
+  }
+
+  var owner = context.documentTab || context.document;
+  if (!owner || typeof owner.newPosition !== 'function' || typeof owner.addBookmark !== 'function') {
+    return '';
+  }
+
+  try {
+    var target = paragraph.getNumChildren() > 0 ? paragraph.getChild(0) : paragraph;
+    var position = owner.newPosition(target, 0);
+    var bookmark = owner.addBookmark(position);
+    var bookmarkId = bookmark && typeof bookmark.getId === 'function' ? String(bookmark.getId() || '') : '';
+    if (!bookmarkId) {
+      return '';
+    }
+
+    // Docs links to bookmarks look like "#bookmark=id.xxxx". getId() may or may
+    // not already carry the "id." prefix, so normalise either way.
+    if (bookmarkId.indexOf('id.') !== 0) {
+      bookmarkId = 'id.' + bookmarkId;
+    }
+    context.anchors[anchorId] = '#bookmark=' + bookmarkId;
+    return context.anchors[anchorId];
+  } catch (e) {
+    // Leave the anchor unresolved; its links stay as plain text.
+    return '';
+  }
+}
+
+function resolvePendingAnchorLinks_(context) {
+  if (!context || !context.pendingLinks || !context.pendingLinks.length) {
+    return;
+  }
+
+  context.pendingLinks.forEach(function(pending) {
+    var url = getAnchorBookmarkUrl_(context, pending.anchorId);
+    if (!url) {
+      return;
+    }
+    try {
+      pending.textElement.setLinkUrl(pending.start, pending.end, url);
+    } catch (e) {
+      // Ignore links that can no longer be applied.
+    }
+  });
 }
 
 function getMarkdownInsertionIndex_(document, body) {
@@ -670,20 +774,20 @@ function findTopLevelBodyChild_(element, body) {
   return null;
 }
 
-function insertMarkdownBlock_(body, index, block) {
+function insertMarkdownBlock_(body, index, block, context) {
   switch (block.type) {
     case 'heading':
-      return insertMarkdownParagraph_(body, index, block, true);
+      return insertMarkdownParagraph_(body, index, block, true, context);
     case 'paragraph':
-      return insertMarkdownParagraph_(body, index, block, false);
+      return insertMarkdownParagraph_(body, index, block, false, context);
     case 'list_item':
-      return insertMarkdownListItem_(body, index, block);
+      return insertMarkdownListItem_(body, index, block, context);
     case 'code':
       return insertMarkdownCodeBlock_(body, index, block);
     case 'mermaid':
       return insertMarkdownMermaidBlock_(body, index, block);
     case 'table':
-      return insertMarkdownTable_(body, index, block);
+      return insertMarkdownTable_(body, index, block, context);
     case 'rule':
       return insertMarkdownRule_(body, index, block);
     default:
@@ -692,26 +796,29 @@ function insertMarkdownBlock_(body, index, block) {
           type: 'paragraph',
           inlines: block.inlines,
           quoteDepth: block.quoteDepth || 0,
-        }, false);
+        }, false, context);
       }
       return index;
   }
 }
 
-function insertMarkdownParagraph_(body, index, block, isHeading) {
+function insertMarkdownParagraph_(body, index, block, isHeading, context) {
   var textContent = buildInlineText_(block.inlines || []);
   var paragraph = body.insertParagraph(index, textContent);
 
   if (isHeading) {
     paragraph.setHeading(getHeadingForLevel_(block.level));
+    if (block.anchorId) {
+      registerHeadingAnchor_(context, paragraph, block.anchorId);
+    }
   }
 
   applyQuoteIndent_(paragraph, block.quoteDepth || 0);
-  applyInlineStyles_(paragraph.editAsText(), block.inlines || []);
+  applyInlineStyles_(paragraph.editAsText(), block.inlines || [], context);
   return index + 1;
 }
 
-function insertMarkdownListItem_(body, index, block) {
+function insertMarkdownListItem_(body, index, block, context) {
   var textContent = buildInlineText_(block.inlines || []);
   var listItem = body.insertListItem(index, textContent);
 
@@ -719,7 +826,7 @@ function insertMarkdownListItem_(body, index, block) {
   listItem.setGlyphType(block.ordered ? DocumentApp.GlyphType.NUMBER : DocumentApp.GlyphType.BULLET);
 
   applyQuoteIndent_(listItem, block.quoteDepth || 0);
-  applyInlineStyles_(listItem.editAsText(), block.inlines || []);
+  applyInlineStyles_(listItem.editAsText(), block.inlines || [], context);
   return index + 1;
 }
 
@@ -1170,7 +1277,7 @@ function insertMarkdownRule_(body, index, block) {
   return index + 1;
 }
 
-function insertMarkdownTable_(body, index, block) {
+function insertMarkdownTable_(body, index, block, context) {
   var headerCells = normalizeMarkdownTableCells_(block.header || []);
   var bodyRows = (block.rows || []).map(function(row) {
     return normalizeMarkdownTableCells_(row || []);
@@ -1221,7 +1328,7 @@ function insertMarkdownTable_(body, index, block) {
       var cell = table.getCell(rowIndex, columnIndex);
       var text = cell.editAsText();
       applyMarkdownTableCellTypography_(text, rowIndex === 0);
-      applyInlineStyles_(text, cellData.inlines || []);
+      applyInlineStyles_(text, cellData.inlines || [], context);
       applyMarkdownTableCellAlignment_(cell, cellData.align);
     }
   }
@@ -1406,7 +1513,7 @@ function buildInlineText_(inlines) {
   }).join('');
 }
 
-function applyInlineStyles_(textElement, inlines) {
+function applyInlineStyles_(textElement, inlines, context) {
   var offset = 0;
 
   (inlines || []).forEach(function(inline) {
@@ -1428,7 +1535,20 @@ function applyInlineStyles_(textElement, inlines) {
       textElement.setStrikethrough(start, end, true);
     }
     if (inline.linkUrl) {
-      textElement.setLinkUrl(start, end, inline.linkUrl);
+      if (String(inline.linkUrl).charAt(0) === '#') {
+        // In-document link to a heading anchor: resolved to a bookmark once all
+        // blocks are inserted. Unresolved anchors are left as plain text.
+        if (context && context.pendingLinks) {
+          context.pendingLinks.push({
+            textElement: textElement,
+            start: start,
+            end: end,
+            anchorId: normalizeAnchorId_(inline.linkUrl),
+          });
+        }
+      } else {
+        textElement.setLinkUrl(start, end, inline.linkUrl);
+      }
     }
     if (inline.code) {
       textElement.setFontFamily(start, end, MARKDOWN_INLINE_CODE_STYLE.fontFamily);
